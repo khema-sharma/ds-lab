@@ -7,20 +7,20 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import org.junit.jupiter.api.Test;
 
 public class PropertyDefinitionTest {
-    private final String scalabilityMetric = "99th percentile for a get, at 100 reads per second, against the target.";
+    private final String scalabilityMetric = "99th percentile for a get, at 100 requests per second.";
     private final String scalabilityUnit = "milliseconds";
-    private final String scalabilityTarget = "200";
-    private final String scalabilityFailure = "The get request slower than the target and the caller will time out.";
+    private final String scalabilityTarget = "200 milliseconds";
+    private final String scalabilityFailure = "The get request is slower than 200 milliseconds, so the caller waiting on it times out.";
 
-    private final String reliabilityMetric = "Write failures, at 100 writes per second, against the target.";
-    private final String reliabilityUnit = "count";
-    private final String reliabilityTarget = "0";
-    private final String reliabilityFailure = "The write request rate higher than target and the caller will get error.";
+    private final String reliabilityMetric = "Time to recover from crash that has tore last write.";
+    private final String reliabilityUnit = "seconds";
+    private final String reliabilityTarget = "60 seconds";
+    private final String reliabilityFailure = "Recovery returns a half-written record, or it does not finish recovering.";
 
-    private final String maintainabilityMetric = "Cyclometric complexity of the code base against the target.";
-    private final String maintainabilityUnit = "count";
-    private final String maintainabilityTarget = "10";
-    private final String maintainabilityFailure = "New team member making changes will see production issues.";
+    private final String maintainabilityMetric = "Number of types touched to add a field to a stored record.";
+    private final String maintainabilityUnit = "types";
+    private final String maintainabilityTarget = "1 type";
+    private final String maintainabilityFailure = "Adding a field forces edits in more than 1 type, so change is no longer local.";
 
     @Test
     public void rejectPropertyWithBlankMetric() {
@@ -76,26 +76,41 @@ public class PropertyDefinitionTest {
 
     @Test
     public void acceptsCompleteDefinition() {
-        assertDoesNotThrow(
+        PropertyDefinition scalabilityDefinition = assertDoesNotThrow(
             () -> new PropertyDefinition(Property.SCALABILITY,
                 scalabilityMetric, 
                 scalabilityUnit,
                 scalabilityTarget,
                 scalabilityFailure)
         );
-        assertDoesNotThrow(
+
+        assertEquals(scalabilityMetric, scalabilityDefinition.metric());
+        assertEquals(scalabilityUnit, scalabilityDefinition.unit());
+        assertEquals(scalabilityTarget, scalabilityDefinition.target());
+        assertEquals(scalabilityFailure, scalabilityDefinition.failure());
+
+        PropertyDefinition reliabilityDefinition = assertDoesNotThrow(
             () -> new PropertyDefinition(Property.RELIABILITY,
                 reliabilityMetric,
                 reliabilityUnit,
                 reliabilityTarget,
                 reliabilityFailure)
         );
-        assertDoesNotThrow(
+        assertEquals(reliabilityMetric, reliabilityDefinition.metric());
+        assertEquals(reliabilityUnit, reliabilityDefinition.unit());
+        assertEquals(reliabilityTarget, reliabilityDefinition.target());
+        assertEquals(reliabilityFailure, reliabilityDefinition.failure());
+
+        PropertyDefinition maintainabilityDefinition = assertDoesNotThrow(
             () -> new PropertyDefinition(Property.MAINTAINABILITY,
                 maintainabilityMetric,
                 maintainabilityUnit,
                 maintainabilityTarget,
                 maintainabilityFailure)
         );
+        assertEquals(maintainabilityMetric, maintainabilityDefinition.metric());
+        assertEquals(maintainabilityUnit, maintainabilityDefinition.unit());
+        assertEquals(maintainabilityTarget, maintainabilityDefinition.target());
+        assertEquals(maintainabilityFailure, maintainabilityDefinition.failure());        
     }
 }

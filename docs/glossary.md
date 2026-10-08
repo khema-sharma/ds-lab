@@ -2,32 +2,33 @@
 
 ## Scalability
 
-Metric: 99th percentile for a get, at 100 reads per second, against the target.
+Metric: 99th percentile for a get, at 100 requests per second.
+
 Unit: milliseconds
 
-Target: 200
+Target: 200 milliseconds
 
-Failure this exposes: The get request slower than the target and the caller will time out.
+Failure this exposes: The get request is slower than 200 milliseconds, so the caller waiting on it times out.
 
 ## Reliability
 
-Metric: Write failures, at 100 writes per second, against the target.
+Metric: Time to recover from crash that has tore last write.
 
-Unit: count
+Unit: seconds
 
-Target: 0
+Target: 60 seconds
 
-Failure it exposes: The write request, at rate higher than 100 writes per second, and the caller will get error.
+Failure this exposes: Recovery returns a half-written record, or it does not finish recovering.
 
 ## Maintainability
 
-Metric: Cyclometric complexity of the code base against the target.
+Metric: Number of types touched to add a field to a stored record.
 
-Unit: count
+Unit: types
 
-Target: 10
+Target: 1 type
 
-Failure it exposes: New team member making changes will see production issues.
+Failure this exposes: Adding a field forces edits in more than 1 type, so change is no longer local.
 
 ## Versions recorded on day 1
 
