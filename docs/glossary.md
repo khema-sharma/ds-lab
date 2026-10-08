@@ -2,7 +2,7 @@
 
 ## Scalability
 
-Metric: 99th percentile for a get, at 100 requests per second.
+Metric: 99th percentile time for a get, at 100 requests per second.
 
 Unit: milliseconds
 

@@ -7,7 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import org.junit.jupiter.api.Test;
 
 public class PropertyDefinitionTest {
-    private final String scalabilityMetric = "99th percentile for a get, at 100 requests per second.";
+    private final String scalabilityMetric = "99th percentile time for a get, at 100 requests per second.";
     private final String scalabilityUnit = "milliseconds";
     private final String scalabilityTarget = "200 milliseconds";
     private final String scalabilityFailure = "The get request is slower than 200 milliseconds, so the caller waiting on it times out.";

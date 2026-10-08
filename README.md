@@ -2,15 +2,15 @@
 
 ## Problem
 
-This respository is a lab for durable key-value store. The first module is `log-store`. Today it only defines three properties. The append-only file is not built yet.
+This repository is a lab for durable key-value store. The first module is `log-store`. Today it only defines three properties. The append-only file is not built yet.
 
 ## Design
 
-The parent build uses Java21. The `log-store` contains `Property` and `PropertyDefinition`. A `PropertyDefinition` with a blank metric, unit, target, or failure. The three values are in [Glossary](./docs/glossary.md).
+The parent build uses Java21. The `log-store` contains `Property` and `PropertyDefinition`. A `PropertyDefinition` cannot be constructed with a blank metric, unit, target, or failure. The three values are in [Glossary](./docs/glossary.md).
 
 ## Failure modes
 
-The tests reject a blank metric, a blank unit, a blanl target, and a blank failure. The module does not recover from a torn write, and it yet does not serve a get.
+The tests reject a blank metric, a blank unit, a blank target, and a blank failure. The module does not recover from a torn write, and it yet does not serve a get.
 
 ## How to run the tests
 
