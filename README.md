@@ -14,7 +14,7 @@ The `log-store` contains:
 
 - `Property` and `PropertyDefinition`. A `PropertyDefinition` cannot be constructed with a blank metric, unit, target, or failure. The three values are in [Glossary](./docs/glossary.md).
 
-- Two stores [InMemoryStore](./log-store/src/main/java/lab/logstore/InMemoryStore.java), which is a has based memory store, and [AppendOnlyLogStore](./log-store/src/main/java/lab/logstore/AppendOnlyLogStore.java) which is a file based append only log store
+- Two stores [InMemoryStore](./log-store/src/main/java/lab/logstore/InMemoryStore.java), which is a hash map based memory store, and [AppendOnlyLogStore](./log-store/src/main/java/lab/logstore/AppendOnlyLogStore.java) which is a file based append only log store
 
 ## Failure modes
 
