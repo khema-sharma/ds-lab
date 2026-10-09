@@ -2,15 +2,23 @@
 
 ## Problem
 
-This repository is a lab for durable key-value store. The first module is `log-store`. It has two append-only stores [FileLogStore](./log-store/src/main/java/lab/logstore/FileLogStore.java) and [InMemoryLogStore](./log-store/src/main/java/lab/logstore/InMemoryLogStore.java).
+This repository is a lab for durable key-value store. The first module is `log-store`.
 
 ## Design
 
-The parent build uses Java21. The `log-store` contains `Property` and `PropertyDefinition`. A `PropertyDefinition` cannot be constructed with a blank metric, unit, target, or failure. The three values are in [Glossary](./docs/glossary.md).
+The parent build uses Java21.
+
+### log-store module
+
+The `log-store` contains:
+
+- `Property` and `PropertyDefinition`. A `PropertyDefinition` cannot be constructed with a blank metric, unit, target, or failure. The three values are in [Glossary](./docs/glossary.md).
+
+- Two stores [InMemoryStore](./log-store/src/main/java/lab/logstore/InMemoryStore.java), which is a has based memory store, and [AppendOnlyLogStore](./log-store/src/main/java/lab/logstore/AppendOnlyLogStore.java) which is a file based append only log store
 
 ## Failure modes
 
-The tests reject a blank metric, a blank unit, a blank target, and a blank failure. The module does not recover from a torn write, and it yet does not serve a get.
+The tests reject a blank metric, a blank unit, a blank target, and a blank failure. The module does not recover from a torn write.
 
 ## How to run the tests
 

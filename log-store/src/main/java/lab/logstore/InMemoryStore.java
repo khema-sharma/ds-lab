@@ -4,7 +4,7 @@ import java.io.IOException;
 import java.util.HashMap;
 import java.util.Map;
 
-public class InMemoryLogStore implements LogStore {
+public class InMemoryStore implements Store {
 
     public static final String ERR_ILLEGAL_KEY = "Key cannot be blank.";
 
@@ -30,7 +30,7 @@ public class InMemoryLogStore implements LogStore {
 
     public static void main(String[] args) {
         try {
-            System.out.println(new InMemoryLogStore().benchmark());
+            System.out.println(new InMemoryStore().benchmark());
 
         } catch (IOException e) {
             e.printStackTrace();

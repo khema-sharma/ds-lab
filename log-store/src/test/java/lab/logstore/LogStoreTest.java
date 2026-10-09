@@ -9,8 +9,8 @@ public class LogStoreTest {
     @Test 
     public void rejectAppendWithBlankKey() {
         IllegalArgumentException exp = assertThrows(IllegalArgumentException.class, 
-            () -> new InMemoryLogStore().write(null, null));
+            () -> new InMemoryStore().write(null, null));
 
-        assertEquals(InMemoryLogStore.ERR_ILLEGAL_KEY, exp.getMessage());
+        assertEquals(InMemoryStore.ERR_ILLEGAL_KEY, exp.getMessage());
     }
 }

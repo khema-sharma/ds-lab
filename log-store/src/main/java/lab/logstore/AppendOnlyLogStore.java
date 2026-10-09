@@ -8,12 +8,12 @@ import java.io.FileWriter;
 import java.io.IOException;
 import java.text.MessageFormat;
 
-public class FileLogStore implements LogStore, Closeable {
+public class AppendOnlyLogStore implements Store, Closeable {
 
     private File store;
     private FileWriter storeWriter;
 
-    public FileLogStore() throws IOException {
+    public AppendOnlyLogStore() throws IOException {
         initStore();
     }
 
@@ -60,7 +60,7 @@ public class FileLogStore implements LogStore, Closeable {
     }
 
     public static void main(String[] args) {
-        try (FileLogStore store = new FileLogStore()) {
+        try (AppendOnlyLogStore store = new AppendOnlyLogStore()) {
             System.out.println(store.benchmark());
 
         } catch (IOException e) {
