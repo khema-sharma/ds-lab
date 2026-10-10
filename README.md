@@ -2,7 +2,7 @@
 
 ## Problem
 
-This repository is a lab for durable key-value store. The first module is `log-store`.
+This repository is a lab for durable key-value store. The first module is `log-store`. Today it only defines three properties and a Lamport clock.
 
 ## Design
 
@@ -14,11 +14,15 @@ The `log-store` contains:
 
 - `Property` and `PropertyDefinition`. A `PropertyDefinition` cannot be constructed with a blank metric, unit, target, or failure. The three values are in [Glossary](./docs/glossary.md).
 
-- Two stores [InMemoryStore](./log-store/src/main/java/lab/logstore/InMemoryStore.java), which is a hash map based memory store, and [AppendOnlyLogStore](./log-store/src/main/java/lab/logstore/AppendOnlyLogStore.java) which is a file based append only log store
+- Two stores [InMemoryStore](./log-store/src/main/java/lab/logstore/InMemoryStore.java), which is a hash map based memory store, and [AppendOnlyLogStore](./log-store/src/main/java/lab/logstore/AppendOnlyLogStore.java) which is a file based append only log store.
+
+- [LamportClock](./log-store/src/main/java/lab/logstore/LamportClock.java) which ensured ordered events and [DistributedProcess](./log-store/src/main/java/lab/logstore/DistributedProcess.java) which mimics a process running on a distributed node.
 
 ## Failure modes
 
 The tests reject a blank metric, a blank unit, a blank target, and a blank failure. The module does not recover from a torn write.
+
+The [Lamport clock tests](./log-store/src/test/java/lab/logstore/LamportTest.java) accepts ordered events on distributed processes when the processes communicate with each other and accept concurrent events when they happen without any communication between processes.
 
 ## How to run the tests
 
@@ -30,7 +34,7 @@ Load test with one caller at a time exists. It does not tell us what happens whe
 
 ## Day 2 measurements
 
-Load testing includes running 100000 reads and writes on a map based store and a file based store and computing their median and 99th percentile time values.
+Load testing includes running 100,000 reads and writes on a map based store and a file based store and computing their median and 99th percentile time values.
 
 The below table summarizes the load test run on day-02.
 
