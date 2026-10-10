@@ -14,10 +14,8 @@ public class LamportClock {
     }
 
     public void onEvent(Event event) {
-        if (event.eventId() > counter) {
-            counter = event.eventId();
-            communicatedEvents.add(event.nodeId() + ':' + event.eventId());
-        }
+        communicatedEvents.add(event.nodeId() + ':' + event.eventId());
+        counter = Math.max(counter, event.eventId());
     }
 
     public boolean hasEvent(Event e) {
