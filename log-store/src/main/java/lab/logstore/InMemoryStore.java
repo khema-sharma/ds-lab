@@ -4,7 +4,7 @@ import java.io.IOException;
 import java.util.HashMap;
 import java.util.Map;
 
-public class InMemoryStore implements Store {
+public class InMemoryStore extends AbstractStore {
 
     public static final String ERR_ILLEGAL_KEY = "Key cannot be blank.";
 
@@ -30,7 +30,10 @@ public class InMemoryStore implements Store {
 
     public static void main(String[] args) {
         try {
-            System.out.println(new InMemoryStore().benchmark());
+            OperationBenchmark[] benchMarks = new InMemoryStore().benchmarkOperations();
+
+            System.out.println("Write benchmarks: " + benchMarks[1]);
+            System.out.println("Read benchmarks: " + benchMarks[0]);
 
         } catch (IOException e) {
             e.printStackTrace();

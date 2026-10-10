@@ -1,7 +1,6 @@
 package lab.logstore;
 
 import java.io.IOException;
-import java.util.Arrays;
 
 public interface Store {
     /**
@@ -34,61 +33,10 @@ public interface Store {
     public void clear() throws IOException;
 
     /**
-     * Benchmarks by writing and reading 100000 entries.
+     * Benchmarks write and read operations.
      * 
-     * @return StoreBenchmark capturing median and 99th percentile times.
+     * @return
      */
-    public default StoreBenchmark benchmark() throws IOException {
-        long[] readMeasurements = new long[100000];
-        long[] writeMeasurements = new long[100000];
-
-        // Begin warm-up
-        for (int i = 0; i < 100000; i++) {
-            long startTime = System.nanoTime();
-            this.write("key-" + i, "value-" + i
-
-            );
-
-            writeMeasurements[i] = (System.nanoTime() - startTime);
-        }
-
-        for (int i = 0; i < 100000; i++) {
-            long startTime = System.nanoTime();
-            this.read("key-" + i);
-
-            readMeasurements[i] = (System.nanoTime() - startTime);
-        }
-        // End warm-up
-
-        clear();
-
-        readMeasurements = new long[100000];
-        writeMeasurements = new long[100000];
-
-        for (int i = 0; i < 100000; i++) {
-            long startTime = System.nanoTime();
-            this.write("key-" + i, "value-" + i
-
-            );
-
-            writeMeasurements[i] = (System.nanoTime() - startTime);
-        }
-
-        for (int i = 0; i < 100000; i++) {
-            long startTime = System.nanoTime();
-            this.read("key-" + i);
-
-            readMeasurements[i] = (System.nanoTime() - startTime);
-        }
-
-        Arrays.sort(readMeasurements);
-        Arrays.sort(writeMeasurements);
-
-        int median = readMeasurements.length / 2;
-        int nintyNineth = (int) (readMeasurements.length * 0.99);
-
-        return new StoreBenchmark(readMeasurements[median], readMeasurements[nintyNineth], writeMeasurements[median],
-                writeMeasurements[nintyNineth]);
-    }
+    public OperationBenchmark[] benchmarkOperations() throws IOException;
 
 }

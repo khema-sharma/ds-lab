@@ -8,7 +8,7 @@ import java.io.FileWriter;
 import java.io.IOException;
 import java.text.MessageFormat;
 
-public class AppendOnlyLogStore implements Store, Closeable {
+public class AppendOnlyLogStore extends AbstractStore implements Closeable {
 
     private File store;
     private FileWriter storeWriter;
@@ -61,8 +61,10 @@ public class AppendOnlyLogStore implements Store, Closeable {
 
     public static void main(String[] args) {
         try (AppendOnlyLogStore store = new AppendOnlyLogStore()) {
-            System.out.println(store.benchmark());
+            OperationBenchmark[] benchMarks = store.benchmarkOperations();
 
+            System.out.println("Write benchmarks: " + benchMarks[1]);
+            System.out.println("Read benchmarks: " + benchMarks[0]);
         } catch (IOException e) {
             e.printStackTrace();
         }
