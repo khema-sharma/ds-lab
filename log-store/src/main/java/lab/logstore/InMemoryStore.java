@@ -32,8 +32,8 @@ public class InMemoryStore extends AbstractStore {
         try {
             OperationBenchmark[] benchMarks = new InMemoryStore().benchmarkOperations();
 
-            System.out.println("Write benchmarks: " + benchMarks[1]);
-            System.out.println("Read benchmarks: " + benchMarks[0]);
+            System.out.println("Write benchmarks: " + benchMarks[0]);
+            System.out.println("Read benchmarks: " + benchMarks[1]);
 
         } catch (IOException e) {
             e.printStackTrace();

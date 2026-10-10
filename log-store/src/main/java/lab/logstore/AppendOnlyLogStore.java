@@ -63,8 +63,8 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
         try (AppendOnlyLogStore store = new AppendOnlyLogStore()) {
             OperationBenchmark[] benchMarks = store.benchmarkOperations();
 
-            System.out.println("Write benchmarks: " + benchMarks[1]);
-            System.out.println("Read benchmarks: " + benchMarks[0]);
+            System.out.println("Write benchmarks: " + benchMarks[0]);
+            System.out.println("Read benchmarks: " + benchMarks[1]);
         } catch (IOException e) {
             e.printStackTrace();
         }

@@ -16,6 +16,13 @@ public abstract class AbstractStore implements Store {
     }
 
     private OperationBenchmark benchmarkReadOperations() throws IOException {
+        clear();
+
+        // Populate records
+        for (int i = 0; i < 100000; i++) {
+            write("key-" + i, "value-" + i);
+        }
+
         // Begin warm-up
         for (int i = 0; i < 100000; i++) {
             this.read("key-" + i);
