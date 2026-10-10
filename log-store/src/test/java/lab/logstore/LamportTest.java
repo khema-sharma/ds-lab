@@ -25,9 +25,9 @@ public class LamportTest {
         DistributedProcess nodeA = new DistributedProcess("node-a");
         DistributedProcess nodeB = new DistributedProcess("node-b");
 
-        Event nodeAEvent = nodeA.generateEvent();
         nodeA.generateEvent();
-        
+        Event nodeAEvent = nodeA.generateEvent();
+
         Event nodeBEvent = nodeB.generateEvent();
 
         assertFalse(nodeB.hasHappenedBeforeRelation(nodeAEvent, nodeBEvent));
