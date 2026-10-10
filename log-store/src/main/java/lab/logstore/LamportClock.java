@@ -1,8 +1,13 @@
 package lab.logstore;
 
-public class LamportClock implements Comparable<LamportClock> {
+import java.util.LinkedList;
+import java.util.List;
+
+public class LamportClock {
 
     private int counter = 0;
+
+    private List<String> communicatedEvents = new LinkedList<String>();
 
     public int next() {
         return ++counter;
@@ -11,24 +16,12 @@ public class LamportClock implements Comparable<LamportClock> {
     public void onEvent(Event event) {
         if (event.eventId() > counter) {
             counter = event.eventId();
+            communicatedEvents.add(event.nodeId() + ':' + event.eventId());
         }
     }
 
-    @Override
-    public int compareTo(LamportClock o) {
-        LamportClock other = (LamportClock) o;
-
-        if (other == this) {
-            return 0;
-        }
-
-        if (counter < other.counter) {
-            return -1;
-        } else if (counter > other.counter) {
-            return 1;
-        }
-
-        return 0;
+    public boolean hasEvent(Event e) {
+        return communicatedEvents.contains(e.nodeId() + ':' + e.eventId());
     }
     
 }

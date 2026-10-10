@@ -14,8 +14,10 @@ public class LamportTest {
 
         Event nodeAEvent = nodeA.generateEvent();
         nodeB.onEvent(nodeAEvent);
+
+        Event nodeBEvent = nodeB.generateEvent();
         
-        assertTrue(nodeB.generateEvent().happenedAfter(nodeAEvent));
+        assertTrue(nodeB.hasHappenedAfterRelation(nodeBEvent, nodeAEvent));
     }
 
     @Test
@@ -26,8 +28,8 @@ public class LamportTest {
         Event nodeAEvent = nodeA.generateEvent();
         Event nodeBEvent = nodeB.generateEvent();
 
-        assertFalse(nodeAEvent.happenedBefore(nodeBEvent));
-        assertFalse(nodeBEvent.happenedBefore(nodeAEvent));
+        assertFalse(nodeB.hasHappenedBeforeRelation(nodeAEvent, nodeBEvent));
+        assertFalse(nodeA.hasHappenedBeforeRelation(nodeBEvent, nodeAEvent));
     }
 
 }

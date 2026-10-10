@@ -1,7 +1,7 @@
 package lab.logstore;
 
 public class DistributedProcess {
-    
+
     private LamportClock nodeClock = new LamportClock();
     private String name = "";
 
@@ -19,6 +19,24 @@ public class DistributedProcess {
 
     public void onEvent(Event event) {
         nodeClock.onEvent(event);
+    }
+
+    public boolean hasHappenedAfterRelation(Event nodeEvent, Event otherEvent) {
+        if (nodeClock.hasEvent(otherEvent)
+            || otherEvent.isFromSameNodeAs(nodeEvent)) {
+            return nodeEvent.eventId() > otherEvent.eventId();
+        }
+
+        return false;
+    }
+
+    public boolean hasHappenedBeforeRelation(Event otherEvent, Event nodeEvent) {
+        if (nodeClock.hasEvent(otherEvent)
+            || otherEvent.isFromSameNodeAs(nodeEvent)) {
+            return otherEvent.eventId() < nodeEvent.eventId();
+        }
+
+        return false;
     }
 
 }
