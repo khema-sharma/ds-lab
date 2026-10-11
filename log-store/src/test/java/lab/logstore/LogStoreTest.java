@@ -46,7 +46,7 @@ public class LogStoreTest {
         Path storePathObject = Path.of(URI.create("file:///" + storePath));
 
         String contents = Files.readString(storePathObject, StandardCharsets.UTF_8);
-        String tornContents = contents.substring(0, 45);
+        String tornContents = contents.substring(0, 35);
 
         Files.writeString(storePathObject, tornContents, StandardCharsets.UTF_8);
     }

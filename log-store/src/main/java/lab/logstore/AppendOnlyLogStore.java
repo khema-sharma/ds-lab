@@ -6,6 +6,7 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileWriter;
 import java.io.IOException;
+import java.nio.charset.Charset;
 import java.text.MessageFormat;
 import java.util.zip.CRC32;
 import java.util.zip.Checksum;
@@ -17,6 +18,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
     private static final String KEY_VALUE_SEP = ":";
     private static final String KEY_VALUE_PATTERN = "{0}" + KEY_VALUE_SEP + "{1}";
     private static final String RECORD_ENTRY_SEP = ",";
+    private static final String RECORD_SEP = "\n";
     private static final String RECORD_ENTRY_PATTERN = "{0}" + RECORD_ENTRY_SEP + "{1}" + RECORD_ENTRY_SEP + "{2}";
 
     private String storePath;
@@ -32,7 +34,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
         }
 
         storePath = path;
-        
+
         try {
             initStore();
 
@@ -66,7 +68,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
         String length = Integer.toString(record.getBytes("utf-8").length);
         String checksum = Long.toString(crc32Checksum.getValue());
 
-        String recordWithMetadata = MessageFormat.format(RECORD_ENTRY_PATTERN + "\n", length, checksum, record);
+        String recordWithMetadata = MessageFormat.format(RECORD_ENTRY_PATTERN + RECORD_SEP, length, checksum, record);
 
         storeWriter.write(recordWithMetadata);
         storeWriter.flush();
@@ -76,7 +78,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
     public String read(String key) throws IOException {
         try (FileInputStream storeStream = new FileInputStream(store)) {
             BufferedInputStream bis = new BufferedInputStream(storeStream);
-            
+
             String[] keyAndValue = new String[] { null, null };
             while (readRecord(bis, keyAndValue) != -1) {
                 if (keyAndValue[0].equals(key)) {
@@ -98,18 +100,30 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
     }
 
     private void initStore() throws IOException {
-        store = (storePath == null ? 
-                    File.createTempFile("write-ahead", ".db") :
-                    new File(storePath));
-        storeWriter = new FileWriter(store, true);
+        store = (storePath == null ? File.createTempFile("write-ahead", ".db") : new File(storePath));
+        storeWriter = new FileWriter(store, Charset.forName("utf-8"), true);
 
         System.out.println("Created store at: " + store);
     }
 
     private int readRecord(BufferedInputStream bis, String[] keyAndValue) throws IOException {
-        int length = Integer.valueOf(readRecordEntry(bis));
-        long checksum = Long.valueOf(readRecordEntry(bis));
-    
+        StringBuffer lengthBuffer = new StringBuffer();
+        int nByte = readRecordEntry(bis, lengthBuffer);
+
+        if (lengthBuffer.isEmpty()) {
+            return nByte;
+        }
+
+        StringBuffer checksumBuffer = new StringBuffer();
+        nByte = readRecordEntry(bis, checksumBuffer);
+
+        if (checksumBuffer.isEmpty()) {
+            return nByte;
+        }
+
+        int length = Integer.valueOf(lengthBuffer.toString());
+        long checksum = Long.valueOf(checksumBuffer.toString());
+
         byte[] contents = bis.readNBytes(length);
         if (contents.length < length) {
             return seekTillEnd(bis);
@@ -125,7 +139,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
 
         String keyValuePair = new String(contents, "utf-8");
         int valueIndex = keyValuePair.indexOf(":");
-        
+
         keyAndValue[0] = keyValuePair.substring(0, valueIndex);
         keyAndValue[1] = keyValuePair.substring(valueIndex + 1);
 
@@ -134,27 +148,31 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
 
     private int seekTillEnd(BufferedInputStream bis) throws IOException {
         int rByte = bis.read();
-        while (rByte != -1 && !Character.toString(rByte).equals("\n")) {
+        while (rByte != -1 && !Character.toString(rByte).equals(RECORD_SEP)) {
             rByte = bis.read();
         }
 
         return rByte;
     }
 
-    private String readRecordEntry(BufferedInputStream bis) throws IOException {
-        String entry = "";
-        
+    private int readRecordEntry(BufferedInputStream bis, StringBuffer recordEntryBuffer) throws IOException {
         int rByte = bis.read();
-        while (rByte != -1 && !Character.toString(rByte).equals(RECORD_ENTRY_SEP)) {
-            entry += Character.toString(rByte);
+
+        StringBuffer tempBuffer = new StringBuffer();
+        while (rByte != -1
+                && !Character.toString(rByte).equals(RECORD_ENTRY_SEP)
+                && !Character.toString(rByte).equals(RECORD_SEP)) {
+
+            tempBuffer.append(Character.toString(rByte));
+
             rByte = bis.read();
         }
 
-        if (rByte == -1) {
-            return null;
+        if (rByte != -1 && Character.toString(rByte).equals(RECORD_ENTRY_SEP)) {
+            recordEntryBuffer.append(tempBuffer);
         }
 
-        return entry;
+        return rByte;
     }
 
     public static void main(String[] args) {
