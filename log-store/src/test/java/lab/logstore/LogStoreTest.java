@@ -4,12 +4,10 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import java.io.IOException;
-import java.io.RandomAccessFile;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.List;
 
 import org.junit.jupiter.api.Test;
 
@@ -20,6 +18,16 @@ public class LogStoreTest {
                 () -> new InMemoryStore().write(null, null));
 
         assertEquals(InMemoryStore.ERR_ILLEGAL_KEY, exp.getMessage());
+    }
+
+    @Test
+    public void acceptsValidWrites() throws StoreInitializationException, IOException {
+        String storePath = createStoreAndAddRecords();
+
+        try (AppendOnlyLogStore store = new AppendOnlyLogStore(storePath)) {
+            assertEquals("value-1", store.read("key-1"));
+            assertEquals("value-2", store.read("key-2"));
+        }
     }
 
     @Test

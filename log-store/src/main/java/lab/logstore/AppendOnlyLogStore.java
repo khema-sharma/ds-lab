@@ -1,13 +1,12 @@
 package lab.logstore;
 
-import java.io.BufferedReader;
+import java.io.BufferedInputStream;
 import java.io.Closeable;
 import java.io.File;
-import java.io.FileReader;
+import java.io.FileInputStream;
 import java.io.FileWriter;
 import java.io.IOException;
 import java.text.MessageFormat;
-import java.util.StringTokenizer;
 import java.util.zip.CRC32;
 import java.util.zip.Checksum;
 
@@ -75,48 +74,13 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
 
     @Override
     public String read(String key) throws IOException {
-        try (FileReader storeReader = new FileReader(store)) {
-            BufferedReader bufferedReader = new BufferedReader(storeReader);
-            String line = bufferedReader.readLine();
-
-            while (line != null) {
-                try {
-                    StringTokenizer tokenizer = new StringTokenizer(line, ",");
-                    
-                    String lengthString = tokenizer.nextToken();
-                    String checksumString = tokenizer.nextToken();
-
-                    int length = Integer.valueOf(lengthString);
-                    long checksum = Long.valueOf(checksumString);
-
-                    int contentsIndex = line.indexOf(checksumString) + checksumString.length() + 1;
-                    String contents = line.substring(contentsIndex);
-
-                    crc32Checksum.reset();
-                    crc32Checksum.update(contents.getBytes("utf-8"));
-                    
-                    if (length != contents.getBytes().length) {
-                        continue;
-                    }
-                    
-                    long actualChecksum = crc32Checksum.getValue();
-                    if (checksum != actualChecksum) {
-                        continue;
-                    }
-
-                    int valueIndex = contents.indexOf(":");
-                    String[] keyValuePair = new String[] { 
-                        contents.substring(0, valueIndex),
-                        contents.substring(valueIndex + 1)
-                    };
-                    
-                    if (key.equals(keyValuePair[0])) {
-                        return keyValuePair[1];
-                    }
-                } catch (Exception e) {
-                    continue;
-                } finally {
-                    line = bufferedReader.readLine();
+        try (FileInputStream storeStream = new FileInputStream(store)) {
+            BufferedInputStream bis = new BufferedInputStream(storeStream);
+            
+            String[] keyAndValue = new String[] { null, null };
+            while (readRecord(bis, keyAndValue) != -1) {
+                if (keyAndValue[0].equals(key)) {
+                    return keyAndValue[1];
                 }
             }
         }
@@ -140,6 +104,57 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
         storeWriter = new FileWriter(store, true);
 
         System.out.println("Created store at: " + store);
+    }
+
+    private int readRecord(BufferedInputStream bis, String[] keyAndValue) throws IOException {
+        int length = Integer.valueOf(readRecordEntry(bis));
+        long checksum = Long.valueOf(readRecordEntry(bis));
+    
+        byte[] contents = bis.readNBytes(length);
+        if (contents.length < length) {
+            return seekTillEnd(bis);
+        }
+
+        crc32Checksum.reset();
+        crc32Checksum.update(contents);
+
+        long actualChecksum = crc32Checksum.getValue();
+        if (checksum != actualChecksum) {
+            return seekTillEnd(bis);
+        }
+
+        String keyValuePair = new String(contents, "utf-8");
+        int valueIndex = keyValuePair.indexOf(":");
+        
+        keyAndValue[0] = keyValuePair.substring(0, valueIndex);
+        keyAndValue[1] = keyValuePair.substring(valueIndex + 1);
+
+        return seekTillEnd(bis);
+    }
+
+    private int seekTillEnd(BufferedInputStream bis) throws IOException {
+        int rByte = bis.read();
+        while (rByte != -1 && !Character.toString(rByte).equals("\n")) {
+            rByte = bis.read();
+        }
+
+        return rByte;
+    }
+
+    private String readRecordEntry(BufferedInputStream bis) throws IOException {
+        String entry = "";
+        
+        int rByte = bis.read();
+        while (!Character.toString(rByte).equals(RECORD_ENTRY_SEP)) {
+            entry += Character.toString(rByte);
+            rByte = bis.read();
+        }
+
+        if (rByte == -1) {
+            return null;
+        }
+
+        return entry;
     }
 
     public static void main(String[] args) {
