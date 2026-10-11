@@ -145,7 +145,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
         String entry = "";
         
         int rByte = bis.read();
-        while (!Character.toString(rByte).equals(RECORD_ENTRY_SEP)) {
+        while (rByte != -1 && !Character.toString(rByte).equals(RECORD_ENTRY_SEP)) {
             entry += Character.toString(rByte);
             rByte = bis.read();
         }
