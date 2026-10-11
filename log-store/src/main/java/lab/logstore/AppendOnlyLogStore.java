@@ -7,19 +7,68 @@ import java.io.FileReader;
 import java.io.FileWriter;
 import java.io.IOException;
 import java.text.MessageFormat;
+import java.util.zip.CRC32;
+import java.util.zip.Checksum;
 
 public class AppendOnlyLogStore extends AbstractStore implements Closeable {
+
+    private static final String ERR_IN_INIT = "An error occurred while initializing store: {0}";
+
+    private static final String KEY_VALUE_SEP = ":";
+    private static final String KEY_VALUE_PATTERN = "{0}" + KEY_VALUE_SEP + "{1}";
+    private static final String RECORD_ENTRY_SEP = ",";
+    private static final String RECORD_ENTRY_PATTERN = "{0}" + RECORD_ENTRY_SEP + "{1}" + RECORD_ENTRY_SEP + "{2}";
+
+    private String storePath;
 
     private File store;
     private FileWriter storeWriter;
 
-    public AppendOnlyLogStore() throws IOException {
-        initStore();
+    private final Checksum crc32Checksum = new CRC32();
+
+    public AppendOnlyLogStore(String path) throws StoreInitializationException {
+        if (path == null || path.isBlank()) {
+            throw new IllegalArgumentException("Store path cannot be null.");
+        }
+
+        storePath = path;
+        
+        try {
+            initStore();
+
+        } catch (Exception e) {
+            throw new StoreInitializationException(
+                    MessageFormat.format(ERR_IN_INIT, e.getMessage()), e);
+        }
+    }
+
+    public AppendOnlyLogStore() throws StoreInitializationException {
+        try {
+            initStore();
+
+        } catch (Exception e) {
+            throw new StoreInitializationException(
+                    MessageFormat.format(ERR_IN_INIT, e.getMessage()), e);
+        }
+    }
+
+    public String getPath() {
+        return store.getAbsolutePath();
     }
 
     @Override
     public void write(String key, String value) throws IOException {
-        storeWriter.write(MessageFormat.format("{0}:{1}\n", key, value));
+        String record = MessageFormat.format(KEY_VALUE_PATTERN, key, value);
+
+        crc32Checksum.reset();
+        crc32Checksum.update(record.getBytes());
+
+        String length = Integer.toString(record.length());
+        String checksum = Long.toString(crc32Checksum.getValue());
+
+        String recordWithMetadata = MessageFormat.format(RECORD_ENTRY_PATTERN + "\n", length, checksum, record);
+
+        storeWriter.write(recordWithMetadata);
         storeWriter.flush();
     }
 
@@ -30,13 +79,40 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
             String line = bufferedReader.readLine();
 
             while (line != null) {
-                String[] keyAndValue = line.split(":");
+                try {
+                    String[] recordEntries = line.split(RECORD_ENTRY_SEP);
 
-                if (key.equals(keyAndValue[0])) {
-                    return keyAndValue[1];
+                    if (recordEntries.length != 3) {
+                        continue;
+                    }
+
+                    int length = Integer.valueOf(recordEntries[0]);
+                    long checksum = Long.valueOf(recordEntries[1]);
+                    
+                    String contents = recordEntries[2];
+
+                    crc32Checksum.reset();
+                    crc32Checksum.update(contents.getBytes());
+                    
+                    if (length != contents.length()) {
+                        continue;
+                    }
+                    
+                    long actualChecksum = crc32Checksum.getValue();
+                    if (checksum != actualChecksum) {
+                        continue;
+                    }
+
+                    String[] keyValuePair = contents.split(":");
+                    
+                    if (key.equals(keyValuePair[0])) {
+                        return keyValuePair[1];
+                    }
+                } catch (Exception e) {
+                    continue;
+                } finally {
+                    line = bufferedReader.readLine();
                 }
-
-                line = bufferedReader.readLine();
             }
         }
 
@@ -53,8 +129,10 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
     }
 
     private void initStore() throws IOException {
-        store = File.createTempFile("write-ahead", ".db");
-        storeWriter = new FileWriter(store);
+        store = (storePath == null ? 
+                    File.createTempFile("write-ahead", ".db") :
+                    new File(storePath));
+        storeWriter = new FileWriter(store, true);
 
         System.out.println("Created store at: " + store);
     }
@@ -65,7 +143,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
 
             System.out.println("Write benchmarks: " + benchMarks[0]);
             System.out.println("Read benchmarks: " + benchMarks[1]);
-        } catch (IOException e) {
+        } catch (StoreInitializationException | IOException e) {
             e.printStackTrace();
         }
     }

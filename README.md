@@ -2,7 +2,7 @@
 
 ## Problem
 
-This repository is a lab for durable key-value store. The first module is `log-store`. Today it only defines three properties and a Lamport clock.
+This repository is a lab for durable key-value store. The first module is `log-store`. Today it only defines three properties, a Lamport clock and an reliable append-only log store which starts even if records are torn.
 
 ## Design
 
@@ -12,11 +12,16 @@ The parent build uses Java21.
 
 The `log-store` contains:
 
-- `Property` and `PropertyDefinition`. A `PropertyDefinition` cannot be constructed with a blank metric, unit, target, or failure. The three values are in [Glossary](./docs/glossary.md).
-
-- Two stores [InMemoryStore](./log-store/src/main/java/lab/logstore/InMemoryStore.java), which is a hash map based memory store, and [AppendOnlyLogStore](./log-store/src/main/java/lab/logstore/AppendOnlyLogStore.java) which is a file based append only log store.
-
-- [LamportClock](./log-store/src/main/java/lab/logstore/LamportClock.java) which ensured ordered events and [DistributedProcess](./log-store/src/main/java/lab/logstore/DistributedProcess.java) which mimics a process running on a distributed node.
+- [Property](./log-store/src/main/java/lab/logstore/Property.java) and [PropertyDefinition](./log-store/src/main/java/lab/logstore/PropertyDefinition.java)
+  - A `PropertyDefinition` cannot be constructed with a blank metric, unit, target, or failure. The three values are in [Glossary](./docs/glossary.md)
+- [InMemoryStore](./log-store/src/main/java/lab/logstore/InMemoryStore.java) is a hash map based memory store
+- [AppendOnlyLogStore](./log-store/src/main/java/lab/logstore/AppendOnlyLogStore.java) is a file based append only log store
+  - If a crash results in torn records then the AppendOnlyStore still boots up and rejects only the torn records
+  - Records which are intact can still be accessed
+- [LamportClock](./log-store/src/main/java/lab/logstore/LamportClock.java) which maintainer logical forward-only counter
+  - It adjusts the counter whenever an event is received in a distributed process holding this clock
+- [DistributedProcess](./log-store/src/main/java/lab/logstore/DistributedProcess.java) which mimics a process running on a distributed node
+  - [Event](./log-store/src/main/java/lab/logstore/Event.java) represents an event generated in a distributed node
 
 ## Failure modes
 
