@@ -7,6 +7,7 @@ import java.io.FileReader;
 import java.io.FileWriter;
 import java.io.IOException;
 import java.text.MessageFormat;
+import java.util.StringTokenizer;
 import java.util.zip.CRC32;
 import java.util.zip.Checksum;
 
@@ -61,9 +62,9 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
         String record = MessageFormat.format(KEY_VALUE_PATTERN, key, value);
 
         crc32Checksum.reset();
-        crc32Checksum.update(record.getBytes());
+        crc32Checksum.update(record.getBytes("utf-8"));
 
-        String length = Integer.toString(record.length());
+        String length = Integer.toString(record.getBytes("utf-8").length);
         String checksum = Long.toString(crc32Checksum.getValue());
 
         String recordWithMetadata = MessageFormat.format(RECORD_ENTRY_PATTERN + "\n", length, checksum, record);
@@ -80,21 +81,21 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
 
             while (line != null) {
                 try {
-                    String[] recordEntries = line.split(RECORD_ENTRY_SEP);
-
-                    if (recordEntries.length != 3) {
-                        continue;
-                    }
-
-                    int length = Integer.valueOf(recordEntries[0]);
-                    long checksum = Long.valueOf(recordEntries[1]);
+                    StringTokenizer tokenizer = new StringTokenizer(line, ",");
                     
-                    String contents = recordEntries[2];
+                    String lengthString = tokenizer.nextToken();
+                    String checksumString = tokenizer.nextToken();
+
+                    int length = Integer.valueOf(lengthString);
+                    long checksum = Long.valueOf(checksumString);
+
+                    int contentsIndex = line.indexOf(checksumString) + checksumString.length() + 1;
+                    String contents = line.substring(contentsIndex);
 
                     crc32Checksum.reset();
-                    crc32Checksum.update(contents.getBytes());
+                    crc32Checksum.update(contents.getBytes("utf-8"));
                     
-                    if (length != contents.length()) {
+                    if (length != contents.getBytes().length) {
                         continue;
                     }
                     
@@ -103,7 +104,11 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
                         continue;
                     }
 
-                    String[] keyValuePair = contents.split(":");
+                    int valueIndex = contents.indexOf(":");
+                    String[] keyValuePair = new String[] { 
+                        contents.substring(0, valueIndex),
+                        contents.substring(valueIndex + 1)
+                    };
                     
                     if (key.equals(keyValuePair[0])) {
                         return keyValuePair[1];

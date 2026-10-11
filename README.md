@@ -25,9 +25,11 @@ The `log-store` contains:
 
 ## Failure modes
 
-The tests reject a blank metric, a blank unit, a blank target, and a blank failure. The module does not recover from a torn write.
+The tests reject a blank metric, a blank unit, a blank target, and a blank failure.
 
 The [Lamport clock tests](./log-store/src/test/java/lab/logstore/LamportTest.java) accepts ordered events on distributed processes when the processes communicate with each other and accept concurrent events when they happen without any communication between processes.
+
+The [AppendOnlyLogStore](./log-store/src/main/java/lab/logstore/AppendOnlyLogStore.java) rejects a torn record.
 
 ## How to run the tests
 
