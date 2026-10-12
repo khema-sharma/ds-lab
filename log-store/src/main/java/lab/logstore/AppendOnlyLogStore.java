@@ -20,7 +20,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
     private AppendOnlyLogStoreWriter storeWriter;
     private AppendOnlyLogStoreReader storeReader;
 
-    private final Map<String, Integer> indexes;
+    private final Map<String, Long> indexes;
 
     public AppendOnlyLogStore() throws StoreInitializationException {
         this(null);
@@ -44,7 +44,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
 
     @Override
     public void write(String key, String value) throws IOException {
-        int offset = storeWriter.insertRecord(key, value);
+        long offset = storeWriter.insertRecord(key, value);
         indexes.put(key, offset);
     }
 

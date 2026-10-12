@@ -6,6 +6,7 @@ import java.io.FileWriter;
 import java.io.IOException;
 import java.io.RandomAccessFile;
 import java.nio.charset.Charset;
+import java.nio.file.Files;
 import java.util.zip.CRC32;
 import java.util.zip.Checksum;
 
@@ -16,20 +17,19 @@ public class AppendOnlyLogStoreWriter implements Closeable {
     private final Checksum crc32Checksum;
     private final File store;
 
-    private int pos;
+    private long pos;
 
     public AppendOnlyLogStoreWriter(File store) throws StoreInitializationException {
         if (store == null) {
             throw new IllegalArgumentException("store cannot be null.");
         }
 
-        pos = 0;
-
         this.store = store;
         crc32Checksum = new CRC32();
 
         try {
             writer = initWriter();
+            pos = Files.size(store.toPath());
 
         } catch (IOException e) {
             throw new StoreInitializationException(e);
@@ -48,11 +48,11 @@ public class AppendOnlyLogStoreWriter implements Closeable {
         writer.flush();
     }
 
-    public int insertRecord(String key, String value) throws IOException {
+    public long insertRecord(String key, String value) throws IOException {
         return insertRecord(new LogStoreRecord(key, value));
     }
 
-    public int insertRecord(LogStoreRecord record) throws IOException {
+    public long insertRecord(LogStoreRecord record) throws IOException {
         if (record == null) {
             throw new IllegalArgumentException("record cannot be null.");
         }
@@ -60,7 +60,7 @@ public class AppendOnlyLogStoreWriter implements Closeable {
         crc32Checksum.reset();
         crc32Checksum.update(record.getBytes());
 
-        int entryPos = pos;
+        long entryPos = pos;
 
         int length = record.getBytes().length;
         long checksum = crc32Checksum.getValue();

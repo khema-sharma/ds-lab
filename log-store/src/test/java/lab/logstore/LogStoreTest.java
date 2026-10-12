@@ -31,12 +31,29 @@ public class LogStoreTest {
     }
 
     @Test
+    public void acceptsWritesBetweenRestarts() throws StoreInitializationException, IOException {
+        String storePath = null;
+
+        try (AppendOnlyLogStore store = new AppendOnlyLogStore()) {
+            storePath = store.getPath();
+            createStoreAndAddRecords(store, new String[][] { { "key-1", "value-1" } });
+        }
+
+        try (AppendOnlyLogStore store = new AppendOnlyLogStore(storePath)) {
+            createStoreAndAddRecords(store, new String[][] { { "key-2", "value-2" } });
+
+            assertEquals("value-1", store.read("key-1"));
+            assertEquals("value-2", store.read("key-2"));
+        }
+    }
+
+    @Test
     public void rejectsTornWrite() throws StoreInitializationException, IOException {
         String storePath = null;
 
         try (AppendOnlyLogStore store = new AppendOnlyLogStore()) {
             storePath = store.getPath();
-            
+
             createStoreAndAddRecords(store, new String[][] { { "key-1", "value-1" }, { "key-2", "value-2" } });
             tearRecord(storePath, 35);
         }
@@ -58,10 +75,10 @@ public class LogStoreTest {
     @Test
     public void acceptsLastCompleteWrite() throws StoreInitializationException, IOException {
         String storePath = null;
-        
+
         try (AppendOnlyLogStore store = new AppendOnlyLogStore()) {
             storePath = store.getPath();
-            
+
             createStoreAndAddRecords(store, new String[][] { { "key-1", "value-1" }, { "key-1", "value-2" } });
             tearRecord(storePath, 50);
         }

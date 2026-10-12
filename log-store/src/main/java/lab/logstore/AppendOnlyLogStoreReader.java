@@ -46,12 +46,12 @@ public class AppendOnlyLogStoreReader implements Closeable {
         storeAccessFile.close();
     }
 
-    public Optional<LogStoreRecord> readRecordAt(int offset) throws IOException {
+    public Optional<LogStoreRecord> readRecordAt(long offset) throws IOException {
         Optional<LogStoreEntry> optionalEntry = readStoreEntryAt(offset);
         return (optionalEntry.isPresent() ? Optional.of(optionalEntry.get().record()) : Optional.empty());
     }
 
-    private Optional<LogStoreEntry> readStoreEntryAt(int offset) throws IOException {
+    private Optional<LogStoreEntry> readStoreEntryAt(long offset) throws IOException {
         StringBuffer lengthBuffer = new StringBuffer();
 
         storeAccessFile.seek(offset);
