@@ -4,8 +4,12 @@ import java.io.Closeable;
 import java.io.File;
 import java.io.IOException;
 import java.text.MessageFormat;
+import java.util.HashMap;
 import java.util.Iterator;
+import java.util.Map;
 import java.util.Optional;
+
+import lab.logstore.AppendOnlyLogStoreReader.LogStoreIterator;
 
 public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogStoreEntry>, Closeable {
 
@@ -15,6 +19,8 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
 
     private AppendOnlyLogStoreWriter storeWriter;
     private AppendOnlyLogStoreReader storeReader;
+
+    private final Map<String, Integer> indexes;
 
     public AppendOnlyLogStore() throws StoreInitializationException {
         this(null);
@@ -28,19 +34,32 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
             throw new StoreInitializationException(
                     MessageFormat.format(ERR_IN_INIT, e.getMessage()), e);
         }
+        
+        indexes = new HashMap<>();
+
+        buildIndexes();
 
         System.out.println("Created store at: " + store.getAbsolutePath());
     }
 
     @Override
     public void write(String key, String value) throws IOException {
-        storeWriter.insertRecord(key, value);
+        int offset = storeWriter.insertRecord(key, value);
+        indexes.put(key, offset);
     }
 
     @Override
     public String read(String key) throws IOException {
-        Optional<LogStoreRecord> record = storeReader.readRecord(key);
+        if (key == null || key.isBlank()) {
+            throw new IllegalArgumentException("key cannot be blank.");
+        }
 
+        if (!indexes.containsKey(key)) {
+            return null;
+        }
+
+        Optional<LogStoreRecord> record = storeReader.readRecordAt(indexes.get(key));
+        
         return (record.isPresent() ? record.get().value() : null);
     }
 
@@ -73,6 +92,19 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
             throw new StoreInitializationException(fne);
         }
     }
+
+    private void buildIndexes() {
+        Iterator<LogStoreEntry> storeIterator = storeReader.new LogStoreIterator();
+
+        while (storeIterator.hasNext()) {
+            LogStoreEntry storeEntry = storeIterator.next();
+
+            if (storeEntry != null) {
+                indexes.put(storeEntry.record().key(), storeEntry.offset());
+            }
+        }
+    }
+
 
     public static void main(String[] args) {
         try (AppendOnlyLogStore store = new AppendOnlyLogStore()) {

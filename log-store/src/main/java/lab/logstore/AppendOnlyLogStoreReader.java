@@ -20,7 +20,6 @@ public class AppendOnlyLogStoreReader implements Closeable {
     private static final int EOF = -1;
 
     private final Checksum crc32Checksum;
-    private final Map<String, Integer> indexes;
 
     private final File logStore;
     private final RandomAccessFile storeAccessFile;
@@ -40,9 +39,6 @@ public class AppendOnlyLogStoreReader implements Closeable {
         }
 
         crc32Checksum = new CRC32();
-        indexes = new HashMap<>();
-
-        buildIndexes();
     }
 
     @Override
@@ -50,29 +46,9 @@ public class AppendOnlyLogStoreReader implements Closeable {
         storeAccessFile.close();
     }
 
-    public Optional<LogStoreRecord> readRecord(String key) throws IOException {
-        if (key == null || key.isBlank()) {
-            throw new IllegalArgumentException("key cannot be blank.");
-        }
-
-        if (!indexes.containsKey(key)) {
-            return Optional.empty();
-        }
-
-        Optional<LogStoreEntry> optionalEntry = readStoreEntryAt(indexes.get(key));
+    public Optional<LogStoreRecord> readRecordAt(int offset) throws IOException {
+        Optional<LogStoreEntry> optionalEntry = readStoreEntryAt(offset);
         return (optionalEntry.isPresent() ? Optional.of(optionalEntry.get().record()) : Optional.empty());
-    }
-
-    private void buildIndexes() {
-        Iterator<LogStoreEntry> storeIterator = new LogStoreIterator();
-
-        while (storeIterator.hasNext()) {
-            LogStoreEntry storeEntry = storeIterator.next();
-
-            if (storeEntry != null) {
-                indexes.put(storeEntry.record().key(), storeEntry.offset());
-            }
-        }
     }
 
     private Optional<LogStoreEntry> readStoreEntryAt(int offset) throws IOException {
@@ -97,9 +73,9 @@ public class AppendOnlyLogStoreReader implements Closeable {
         long checksum = Long.valueOf(checksumBuffer.toString());
 
         byte[] contents = new byte[length];
-        storeAccessFile.read(contents);
+        int actualLength = storeAccessFile.read(contents);
         
-        if (contents.length < length) {
+        if (actualLength < length) {
             return Optional.empty();
         }
 
