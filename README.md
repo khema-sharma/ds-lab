@@ -2,7 +2,7 @@
 
 ## Problem
 
-This repository is a lab for durable key-value store. The first module is `log-store`. Today it only defines three properties, a Lamport clock and an reliable append-only log store which starts even if records are torn.
+This repository is a lab for durable key-value store. The first module is `log-store`. Today it only defines three properties, a Lamport clock and an reliable append-only log store which rejects torn records.
 
 ## Design
 
@@ -18,6 +18,7 @@ The `log-store` contains:
 - [AppendOnlyLogStore](./log-store/src/main/java/lab/logstore/AppendOnlyLogStore.java) is a file based append only log store
   - If a crash results in torn records then the AppendOnlyStore still boots up and rejects only the torn records
   - Records which are intact can still be accessed
+  - It maintains an key indexes so that values are read by directly jumping to the offset where the record exists
 - [LamportClock](./log-store/src/main/java/lab/logstore/LamportClock.java) which maintainer logical forward-only counter
   - It adjusts the counter whenever an event is received in a distributed process holding this clock
 - [DistributedProcess](./log-store/src/main/java/lab/logstore/DistributedProcess.java) which mimics a process running on a distributed node
@@ -27,9 +28,16 @@ The `log-store` contains:
 
 The tests reject a blank metric, a blank unit, a blank target, and a blank failure.
 
-The [Lamport clock tests](./log-store/src/test/java/lab/logstore/LamportTest.java) accepts ordered events on distributed processes when the processes communicate with each other and accept concurrent events when they happen without any communication between processes.
+The [Lamport clock tests](./log-store/src/test/java/lab/logstore/LamportTest.java):
 
-The [AppendOnlyLogStore](./log-store/src/main/java/lab/logstore/AppendOnlyLogStore.java) rejects a torn record.
+- Accepts ordered events on distributed processes when the processes communicate with each other
+- Accepts concurrent events when they happen without any communication between processes
+
+The [AppendOnlyLogStore](./log-store/src/main/java/lab/logstore/AppendOnlyLogStore.java)
+
+- Rejects a torn record
+- Accepts latest value of a key
+- Accepts old value of a key if record containing latest value is torn
 
 ## How to run the tests
 

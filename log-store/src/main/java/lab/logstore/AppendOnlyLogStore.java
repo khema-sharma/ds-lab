@@ -1,178 +1,77 @@
 package lab.logstore;
 
-import java.io.BufferedInputStream;
 import java.io.Closeable;
 import java.io.File;
-import java.io.FileInputStream;
-import java.io.FileWriter;
 import java.io.IOException;
-import java.nio.charset.Charset;
 import java.text.MessageFormat;
-import java.util.zip.CRC32;
-import java.util.zip.Checksum;
+import java.util.Iterator;
+import java.util.Optional;
 
-public class AppendOnlyLogStore extends AbstractStore implements Closeable {
+public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogStoreEntry>, Closeable {
 
     private static final String ERR_IN_INIT = "An error occurred while initializing store: {0}";
 
-    private static final String KEY_VALUE_SEP = ":";
-    private static final String KEY_VALUE_PATTERN = "{0}" + KEY_VALUE_SEP + "{1}";
-    private static final String RECORD_ENTRY_SEP = ",";
-    private static final String RECORD_SEP = "\n";
-    private static final String RECORD_ENTRY_PATTERN = "{0}" + RECORD_ENTRY_SEP + "{1}" + RECORD_ENTRY_SEP + "{2}";
-
-    private String storePath;
-
     private File store;
-    private FileWriter storeWriter;
 
-    private final Checksum crc32Checksum = new CRC32();
-
-    public AppendOnlyLogStore(String path) throws StoreInitializationException {
-        if (path == null || path.isBlank()) {
-            throw new IllegalArgumentException("Store path cannot be null.");
-        }
-
-        storePath = path;
-
-        try {
-            initStore();
-
-        } catch (Exception e) {
-            throw new StoreInitializationException(
-                    MessageFormat.format(ERR_IN_INIT, e.getMessage()), e);
-        }
-    }
+    private AppendOnlyLogStoreWriter storeWriter;
+    private AppendOnlyLogStoreReader storeReader;
 
     public AppendOnlyLogStore() throws StoreInitializationException {
+        this(null);
+    }
+
+    public AppendOnlyLogStore(String path) throws StoreInitializationException {
         try {
-            initStore();
+            initStore(path);
 
         } catch (Exception e) {
             throw new StoreInitializationException(
                     MessageFormat.format(ERR_IN_INIT, e.getMessage()), e);
         }
+
+        System.out.println("Created store at: " + store.getAbsolutePath());
+    }
+
+    @Override
+    public void write(String key, String value) throws IOException {
+        storeWriter.insertRecord(key, value);
+    }
+
+    @Override
+    public String read(String key) throws IOException {
+        Optional<LogStoreRecord> record = storeReader.readRecord(key);
+
+        return (record.isPresent() ? record.get().value() : null);
+    }
+
+    @Override
+    public void clear() throws IOException {
+        storeWriter.clear();
+    }
+
+    @Override
+    public void close() throws IOException {
+        storeWriter.close();
+        storeReader.close();
+    }
+
+    @Override
+    public Iterator<LogStoreEntry> iterator() {
+        return storeReader.new LogStoreIterator();
     }
 
     public String getPath() {
         return store.getAbsolutePath();
     }
 
-    @Override
-    public void write(String key, String value) throws IOException {
-        String record = MessageFormat.format(KEY_VALUE_PATTERN, key, value);
-
-        crc32Checksum.reset();
-        crc32Checksum.update(record.getBytes("utf-8"));
-
-        String length = Integer.toString(record.getBytes("utf-8").length);
-        String checksum = Long.toString(crc32Checksum.getValue());
-
-        String recordWithMetadata = MessageFormat.format(RECORD_ENTRY_PATTERN + RECORD_SEP, length, checksum, record);
-
-        storeWriter.write(recordWithMetadata);
-        storeWriter.flush();
-    }
-
-    @Override
-    public String read(String key) throws IOException {
-        try (FileInputStream storeStream = new FileInputStream(store)) {
-            BufferedInputStream bis = new BufferedInputStream(storeStream);
-
-            String[] keyAndValue = new String[] { null, null };
-            while (readRecord(bis, keyAndValue) != -1) {
-                if (keyAndValue[0].equals(key)) {
-                    return keyAndValue[1];
-                }
-            }
+    private void initStore(String path) throws StoreInitializationException {
+        try {
+            store = (path == null ? File.createTempFile("write-ahead", ".db") : new File(path));
+            storeWriter = new AppendOnlyLogStoreWriter(store);
+            storeReader = new AppendOnlyLogStoreReader(store);
+        } catch (IOException fne) {
+            throw new StoreInitializationException(fne);
         }
-
-        return null;
-    }
-
-    @Override
-    public void clear() throws IOException {
-        initStore();
-    }
-
-    public void close() throws IOException {
-        storeWriter.close();
-    }
-
-    private void initStore() throws IOException {
-        store = (storePath == null ? File.createTempFile("write-ahead", ".db") : new File(storePath));
-        storeWriter = new FileWriter(store, Charset.forName("utf-8"), true);
-
-        System.out.println("Created store at: " + store);
-    }
-
-    private int readRecord(BufferedInputStream bis, String[] keyAndValue) throws IOException {
-        StringBuffer lengthBuffer = new StringBuffer();
-        int nByte = readRecordEntry(bis, lengthBuffer);
-
-        if (lengthBuffer.isEmpty()) {
-            return nByte;
-        }
-
-        StringBuffer checksumBuffer = new StringBuffer();
-        nByte = readRecordEntry(bis, checksumBuffer);
-
-        if (checksumBuffer.isEmpty()) {
-            return nByte;
-        }
-
-        int length = Integer.valueOf(lengthBuffer.toString());
-        long checksum = Long.valueOf(checksumBuffer.toString());
-
-        byte[] contents = bis.readNBytes(length);
-        if (contents.length < length) {
-            return seekTillEnd(bis);
-        }
-
-        crc32Checksum.reset();
-        crc32Checksum.update(contents);
-
-        long actualChecksum = crc32Checksum.getValue();
-        if (checksum != actualChecksum) {
-            return seekTillEnd(bis);
-        }
-
-        String keyValuePair = new String(contents, "utf-8");
-        int valueIndex = keyValuePair.indexOf(":");
-
-        keyAndValue[0] = keyValuePair.substring(0, valueIndex);
-        keyAndValue[1] = keyValuePair.substring(valueIndex + 1);
-
-        return seekTillEnd(bis);
-    }
-
-    private int seekTillEnd(BufferedInputStream bis) throws IOException {
-        int rByte = bis.read();
-        while (rByte != -1 && !Character.toString(rByte).equals(RECORD_SEP)) {
-            rByte = bis.read();
-        }
-
-        return rByte;
-    }
-
-    private int readRecordEntry(BufferedInputStream bis, StringBuffer recordEntryBuffer) throws IOException {
-        int rByte = bis.read();
-
-        StringBuffer tempBuffer = new StringBuffer();
-        while (rByte != -1
-                && !Character.toString(rByte).equals(RECORD_ENTRY_SEP)
-                && !Character.toString(rByte).equals(RECORD_SEP)) {
-
-            tempBuffer.append(Character.toString(rByte));
-
-            rByte = bis.read();
-        }
-
-        if (rByte != -1 && Character.toString(rByte).equals(RECORD_ENTRY_SEP)) {
-            recordEntryBuffer.append(tempBuffer);
-        }
-
-        return rByte;
     }
 
     public static void main(String[] args) {
