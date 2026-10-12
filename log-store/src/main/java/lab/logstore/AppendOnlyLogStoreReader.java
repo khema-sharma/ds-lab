@@ -120,7 +120,6 @@ public class AppendOnlyLogStoreReader implements Closeable {
 
         while (nByte != EOF && !Character.toString(nByte).equals(RECORD_SEP)) {
             nByte = input.read();
-
             if (nByte != EOF) {
                 bytesRead++;
             }
@@ -146,7 +145,6 @@ public class AppendOnlyLogStoreReader implements Closeable {
             tempBuffer.append(Character.toString(nByte));
 
             nByte = input.read();
-
             if (nByte != EOF) {
                 bytesRead++;
             }
@@ -164,8 +162,7 @@ public class AppendOnlyLogStoreReader implements Closeable {
 
             @Override
             public int read() throws IOException {
-                int bRead = storeAccessFile.read();
-                return (bRead != -1 ? bRead : 0);
+                return storeAccessFile.read();
             }
 
             @Override
@@ -180,7 +177,7 @@ public class AppendOnlyLogStoreReader implements Closeable {
                         contents[index++] = (byte) bRead;
                         bRead = storeAccessFile.read();
                     }
-                } while (bRead != -1);
+                } while (bRead != -1 && index < length);
 
                 byte[] actualContents = contents;
                 if (index < length) {
@@ -257,8 +254,7 @@ public class AppendOnlyLogStoreReader implements Closeable {
 
                 @Override
                 public int read() throws IOException {
-                    int bRead = bufferedStoreStream.read();
-                    return (bRead == -1 ? 0 : bRead);
+                    return bufferedStoreStream.read();
                 }
 
                 @Override
