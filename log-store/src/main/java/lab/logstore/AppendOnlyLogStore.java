@@ -9,8 +9,6 @@ import java.util.Iterator;
 import java.util.Map;
 import java.util.Optional;
 
-import lab.logstore.AppendOnlyLogStoreReader.LogStoreIterator;
-
 public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogStoreEntry>, Closeable {
 
     private static final String ERR_IN_INIT = "An error occurred while initializing store: {0}";
@@ -44,8 +42,8 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
 
     @Override
     public void write(String key, String value) throws IOException {
-        long offset = storeWriter.insertRecord(key, value);
-        indexes.put(key, offset);
+        LogStoreEntry storeEntry = storeWriter.insertRecord(key, value);
+        indexes.put(key, storeEntry.offset());
     }
 
     @Override
@@ -76,7 +74,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
 
     @Override
     public Iterator<LogStoreEntry> iterator() {
-        return storeReader.new LogStoreIterator();
+        return storeReader.new AppendOnlyLogStoreIterator();
     }
 
     public String getPath() {
@@ -94,7 +92,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
     }
 
     private void buildIndexes() {
-        Iterator<LogStoreEntry> storeIterator = storeReader.new LogStoreIterator();
+        Iterator<LogStoreEntry> storeIterator = storeReader.new AppendOnlyLogStoreIterator();
 
         while (storeIterator.hasNext()) {
             LogStoreEntry storeEntry = storeIterator.next();

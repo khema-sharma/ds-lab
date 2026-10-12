@@ -4,7 +4,6 @@ import java.io.Closeable;
 import java.io.File;
 import java.io.FileWriter;
 import java.io.IOException;
-import java.io.RandomAccessFile;
 import java.nio.charset.Charset;
 import java.nio.file.Files;
 import java.util.zip.CRC32;
@@ -48,11 +47,11 @@ public class AppendOnlyLogStoreWriter implements Closeable {
         writer.flush();
     }
 
-    public long insertRecord(String key, String value) throws IOException {
+    public LogStoreEntry insertRecord(String key, String value) throws IOException {
         return insertRecord(new LogStoreRecord(key, value));
     }
 
-    public long insertRecord(LogStoreRecord record) throws IOException {
+    public LogStoreEntry insertRecord(LogStoreRecord record) throws IOException {
         if (record == null) {
             throw new IllegalArgumentException("record cannot be null.");
         }
@@ -65,15 +64,16 @@ public class AppendOnlyLogStoreWriter implements Closeable {
         int length = record.getBytes().length;
         long checksum = crc32Checksum.getValue();
 
-        String storeEntry = new LogStoreEntry(-1, length, checksum, record).toString()
-                + AppendOnlyLogStoreReader.RECORD_SEP;
+        LogStoreEntry storeEntry = new LogStoreEntry(entryPos, length, checksum, record);
 
-        writer.write(storeEntry);
+        String storeEntryString = storeEntry.toString() + AppendOnlyLogStoreReader.RECORD_SEP;
+
+        writer.write(storeEntryString);
         writer.flush();
 
-        pos += storeEntry.length();
+        pos += storeEntryString.length();
 
-        return entryPos;
+        return storeEntry;
     }
 
     private FileWriter initWriter() throws IOException {
