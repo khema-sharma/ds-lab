@@ -84,6 +84,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
     private void initStore(String path) throws StoreInitializationException {
         try {
             store = (path == null ? File.createTempFile("write-ahead", ".db") : new File(path));
+            
             storeWriter = new AppendOnlyLogStoreWriter(store);
             storeReader = new AppendOnlyLogStoreReader(store);
         } catch (IOException fne) {

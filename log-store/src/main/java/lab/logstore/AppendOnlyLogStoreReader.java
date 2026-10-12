@@ -40,7 +40,7 @@ public class AppendOnlyLogStoreReader implements Closeable {
 
         crc32Checksum = new CRC32();
 
-        storeDataInput = creareRandomAccessStoreDataInput();
+        storeDataInput = createRandomAccessStoreDataInput();
     }
 
     @Override
@@ -62,7 +62,7 @@ public class AppendOnlyLogStoreReader implements Closeable {
         StringBuffer lengthBuffer = new StringBuffer();
 
         long entryOffset = offset;
-        long bytesRead = 0;
+        int bytesRead = 0;
 
         bytesRead += readStoreEntryItem(lengthBuffer, input);
 
@@ -80,12 +80,10 @@ public class AppendOnlyLogStoreReader implements Closeable {
         int length = Integer.valueOf(lengthBuffer.toString());
         long checksum = Long.valueOf(checksumBuffer.toString());
 
-        byte[] contents = new byte[length];
-        long tBytes = input.read(contents);
+        byte[] contents = input.read(length);
+        bytesRead +=  contents.length;
 
-        bytesRead +=  tBytes;
-
-        if (tBytes < length) {
+        if (contents.length < length) {
             bytesRead += seekTillLineFeed(input);
             return new ReadStoreEntryResult(bytesRead, emptyEntry);
         }
@@ -161,17 +159,39 @@ public class AppendOnlyLogStoreReader implements Closeable {
         return bytesRead;
     }
 
-    private LogStoreDataInput creareRandomAccessStoreDataInput() {
+    private LogStoreDataInput createRandomAccessStoreDataInput() {
         return new LogStoreDataInput() {
 
             @Override
             public int read() throws IOException {
-                return storeAccessFile.read();
+                int bRead = storeAccessFile.read();
+                return (bRead != -1 ? bRead : 0);
             }
 
             @Override
-            public int read(byte[] bytes) throws IOException {
-                return storeAccessFile.read(bytes);
+            public byte[] read(int length) throws IOException {
+                byte[] contents = new byte[length];
+
+                int bRead = storeAccessFile.read();
+                int index = 0;
+
+                do {
+                    if (bRead != -1) {
+                        contents[index++] = (byte) bRead;
+                        bRead = storeAccessFile.read();
+                    }
+                } while (bRead != -1);
+
+                byte[] actualContents = contents;
+                if (index < length) {
+                    actualContents = new byte[index];
+
+                    for (int i = 0; i < index; i++) {
+                        actualContents[i] = contents[i];
+                    }
+                }
+
+                return actualContents;
             }
 
         };
@@ -188,20 +208,8 @@ public class AppendOnlyLogStoreReader implements Closeable {
     }
 
     private interface LogStoreDataInput {
-        /**
-         * Reads next byte from the stream
-         * 
-         * @return The byte read or -1 if end of file has been reached
-         */
         public int read() throws IOException;
-
-        /**
-         * Reads up to {@code bytes.length} bytes from the stream into array of bytes.
-         * 
-         * @param bytes byte array into which read bytes will be placed
-         * @return Total number of bytes read or -1 if end of file has been reached
-         */
-        public int read(byte[] bytes) throws IOException;
+        public byte[] read(int length) throws IOException;
     }
 
     public class AppendOnlyLogStoreIterator implements Iterator<LogStoreEntry> {
@@ -249,12 +257,13 @@ public class AppendOnlyLogStoreReader implements Closeable {
 
                 @Override
                 public int read() throws IOException {
-                    return bufferedStoreStream.read();
+                    int bRead = bufferedStoreStream.read();
+                    return (bRead == -1 ? 0 : bRead);
                 }
 
                 @Override
-                public int read(byte[] bytes) throws IOException {
-                    return bufferedStoreStream.read(bytes);
+                public byte[] read(int length) throws IOException {
+                    return bufferedStoreStream.readNBytes(length);
                 }
 
             };
