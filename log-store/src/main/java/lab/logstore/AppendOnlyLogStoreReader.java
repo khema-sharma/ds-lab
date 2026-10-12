@@ -176,7 +176,7 @@ public class AppendOnlyLogStoreReader implements Closeable {
                 int index = 0;
 
                 do {
-                    if (bRead != -1) {
+                    if (bRead != -1 && index < length) {
                         contents[index++] = (byte) bRead;
                         bRead = storeAccessFile.read();
                     }
@@ -230,7 +230,7 @@ public class AppendOnlyLogStoreReader implements Closeable {
                 pos = -1;
             }
 
-            bufferedStreamInput = createBufferedStreamInput();
+            bufferedStreamInput = createBufferedStreamStoreDataInput();
         }
 
         @Override
@@ -252,7 +252,7 @@ public class AppendOnlyLogStoreReader implements Closeable {
             }
         }
 
-        private LogStoreDataInput createBufferedStreamInput() {
+        private LogStoreDataInput createBufferedStreamStoreDataInput() {
             return new LogStoreDataInput() {
 
                 @Override
