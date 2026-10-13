@@ -9,6 +9,21 @@ import java.util.Iterator;
 import java.util.Map;
 import java.util.Optional;
 
+/**
+ * AppendOnlyLogStore is a simple {@code(key, value)} store backed up by a single database file.
+ * <p>
+ * To create an instance of the store, one of the following constructors can be used:
+ * <ul>
+ *  <li>The {@link #AppendOnlyLogStore()} creates a store backed up by a temporary file
+ *  <li>The {@link #AppendOnlyLogStore(String)} creates a stored backed up by the file located at given {@code path}
+ * </ul>
+ * <p>
+ * Following methods allow to work with the store:
+ * <ul>
+ *  <li>The {@link #write(String, String)} method writes the given {@code(key, value)} pair to the store
+ *  <li>The {@link #read(String)} method return the value of the given {@code key} from the store
+ * </ul>
+ */
 public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogStoreEntry>, Closeable {
 
     private static final String ERR_IN_INIT = "An error occurred while initializing store: {0}";

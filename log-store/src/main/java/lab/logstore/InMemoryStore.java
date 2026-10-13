@@ -9,18 +9,25 @@ public class InMemoryStore extends AbstractStore {
     public static final String ERR_ILLEGAL_KEY = "Key cannot be blank.";
 
     private Map<String, String> store = new HashMap<>();
-    
+
+    // Ensures read operation sees last complete write operation
+    private final Object readWriteMonitor = new Object();
+
     public void write(String key, String value) throws IOException {
         if (key == null || key.isBlank()) {
             throw new IllegalArgumentException(ERR_ILLEGAL_KEY);
         }
 
-        store.put(key, value);
+        synchronized (readWriteMonitor) {
+            store.put(key, value);
+        }
     }
 
     @Override
     public String read(String key) throws IOException {
-        return store.get(key);
+        synchronized (readWriteMonitor) {
+            return store.get(key);
+        }
     }
 
     @Override

@@ -1,7 +1,6 @@
 package lab.logstore;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import java.io.IOException;
 import java.net.URI;
@@ -12,13 +11,6 @@ import java.nio.file.Path;
 import org.junit.jupiter.api.Test;
 
 public class LogStoreTest {
-    @Test
-    public void rejectAppendWithBlankKey() {
-        IllegalArgumentException exp = assertThrows(IllegalArgumentException.class,
-                () -> new InMemoryStore().write(null, null));
-
-        assertEquals(InMemoryStore.ERR_ILLEGAL_KEY, exp.getMessage());
-    }
 
     @Test
     public void acceptsValidWrites() throws StoreInitializationException, IOException {

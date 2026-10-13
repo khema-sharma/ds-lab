@@ -7,6 +7,7 @@ import java.io.FileInputStream;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.RandomAccessFile;
+import java.nio.file.Files;
 import java.util.Iterator;
 import java.util.Optional;
 import java.util.zip.CRC32;
@@ -220,7 +221,9 @@ public class AppendOnlyLogStoreReader implements Closeable {
                 storeStream = new FileInputStream(logStore);
                 bufferedStoreStream = new BufferedInputStream(storeStream);
 
-            } catch (FileNotFoundException e) {
+                pos = (Files.size(logStore.toPath()) > 0 ? 0 : -1);
+
+            } catch (IOException e) {
                 pos = -1;
             }
         }
