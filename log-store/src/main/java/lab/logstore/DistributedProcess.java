@@ -1,5 +1,10 @@
 package lab.logstore;
-
+/**
+ * Mimics a process/server running on some node in a distributed system.
+ * <p>
+ * It holds an instance of {@link LamportClock} to generate ordered timestamps.
+ * 
+ */
 public class DistributedProcess {
 
     private LamportClock nodeClock = new LamportClock();

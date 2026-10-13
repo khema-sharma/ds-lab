@@ -74,7 +74,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
 
     @Override
     public Iterator<LogStoreEntry> iterator() {
-        return storeReader.new AppendOnlyLogStoreIterator();
+        return storeReader.iterator();
     }
 
     public String getPath() {
@@ -93,7 +93,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
     }
 
     private void buildIndexes() {
-        Iterator<LogStoreEntry> storeIterator = storeReader.new AppendOnlyLogStoreIterator();
+        Iterator<LogStoreEntry> storeIterator = storeReader.iterator();
 
         while (storeIterator.hasNext()) {
             LogStoreEntry storeEntry = storeIterator.next();

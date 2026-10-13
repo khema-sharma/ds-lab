@@ -48,6 +48,10 @@ public class AppendOnlyLogStoreReader implements Closeable {
         storeAccessFile.close();
     }
 
+    public Iterator<LogStoreEntry> iterator() {
+        return new AppendOnlyLogStoreIterator();
+    }
+
     public Optional<LogStoreRecord> readRecordAt(long offset) throws IOException {
         storeAccessFile.seek(offset);
 
@@ -81,7 +85,7 @@ public class AppendOnlyLogStoreReader implements Closeable {
         long checksum = Long.valueOf(checksumBuffer.toString());
 
         byte[] contents = input.read(length);
-        bytesRead +=  contents.length;
+        bytesRead += contents.length;
 
         if (contents.length < length) {
             bytesRead += seekTillLineFeed(input);
@@ -106,7 +110,7 @@ public class AppendOnlyLogStoreReader implements Closeable {
         LogStoreEntry entry = new LogStoreEntry(entryOffset, length, actualChecksum, new LogStoreRecord(aKey, keyValue));
 
         bytesRead += seekTillLineFeed(input);
-        
+
         return new ReadStoreEntryResult(bytesRead, Optional.of(entry));
     }
 
@@ -204,19 +208,12 @@ public class AppendOnlyLogStoreReader implements Closeable {
         }
     }
 
-    private interface LogStoreDataInput {
-        public int read() throws IOException;
-        public byte[] read(int length) throws IOException;
-    }
-
-    public class AppendOnlyLogStoreIterator implements Iterator<LogStoreEntry> {
+    private class AppendOnlyLogStoreIterator implements Iterator<LogStoreEntry>, LogStoreDataInput {
 
         private long pos = 0;
 
         private FileInputStream storeStream = null;
         private BufferedInputStream bufferedStoreStream = null;
-
-        private final LogStoreDataInput bufferedStreamInput;
 
         public AppendOnlyLogStoreIterator() {
             try {
@@ -226,8 +223,6 @@ public class AppendOnlyLogStoreReader implements Closeable {
             } catch (FileNotFoundException e) {
                 pos = -1;
             }
-
-            bufferedStreamInput = createBufferedStreamStoreDataInput();
         }
 
         @Override
@@ -241,28 +236,22 @@ public class AppendOnlyLogStoreReader implements Closeable {
             return (optionalEntry.isEmpty() ? null : optionalEntry.get());
         }
 
+        @Override
+        public int read() throws IOException {
+            return bufferedStoreStream.read();
+        }
+
+        @Override
+        public byte[] read(int length) throws IOException {
+            return bufferedStoreStream.readNBytes(length);
+        }
+
         private void close() {
             try {
                 storeStream.close();
             } catch (IOException e1) {
                 e1.printStackTrace();
             }
-        }
-
-        private LogStoreDataInput createBufferedStreamStoreDataInput() {
-            return new LogStoreDataInput() {
-
-                @Override
-                public int read() throws IOException {
-                    return bufferedStoreStream.read();
-                }
-
-                @Override
-                public byte[] read(int length) throws IOException {
-                    return bufferedStoreStream.readNBytes(length);
-                }
-
-            };
         }
 
         private Optional<LogStoreEntry> readNext() {
@@ -272,8 +261,8 @@ public class AppendOnlyLogStoreReader implements Closeable {
 
             try {
                 long lastPos = pos;
-                 
-                ReadStoreEntryResult result = readStoreEntryAt(lastPos, bufferedStreamInput);
+
+                ReadStoreEntryResult result = readStoreEntryAt(lastPos, this);
                 pos += result.bytesRead();
 
                 if (pos == lastPos) {
