@@ -26,7 +26,7 @@ public class InMemoryStoreTest {
     public void acceptsCompletedWrite() throws IOException {
         InMemoryStore store = new InMemoryStore();
         store.write("key-1", "value-1");
-        
+
         assertEquals("value-1", store.read("key-1"));
     }
 
@@ -36,7 +36,7 @@ public class InMemoryStoreTest {
         store.write("key-1", "value-1");
 
         final ExecutorService service = Executors.newFixedThreadPool(2);
-        
+
         service.execute(() -> {
             try {
                 Thread.sleep(2);
@@ -47,11 +47,11 @@ public class InMemoryStoreTest {
         });
 
         final Set<String> observedValues = new HashSet<>();
-        
+
         service.submit(() -> {
             try {
                 String value = null;
-                
+
                 do {
                     value = store.read("key-1");
                     observedValues.add(value);
@@ -62,7 +62,14 @@ public class InMemoryStoreTest {
             }
         }).get();
 
-        assertTrue(observedValues.contains("value-1") || observedValues.contains("value-2"));
+        // Guarantee that read never observes a broken value i.e. store must return only
+        // "value-1" until "value-2" write is completed
+        for (String observedValue : observedValues) {
+            assertTrue(observedValue.equals("value-1") || observedValue.equals("value-2"));
+        }
+
+        // Ensure that the reader thread sees value-2 written by writer thread
+        assertTrue(observedValues.contains("value-2"));
     }
 
 }
