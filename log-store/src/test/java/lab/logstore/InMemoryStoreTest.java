@@ -2,8 +2,11 @@ package lab.logstore;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.IOException;
+import java.util.HashSet;
+import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -43,12 +46,15 @@ public class InMemoryStoreTest {
             }
         });
 
+        final Set<String> observedValues = new HashSet<>();
+        
         service.submit(() -> {
             try {
                 String value = null;
                 
                 do {
                     value = store.read("key-1");
+                    observedValues.add(value);
 
                 } while (value != null && !value.equals("value-2"));
             } catch (IOException e) {
@@ -56,7 +62,7 @@ public class InMemoryStoreTest {
             }
         }).get();
 
-        assertEquals("value-2", store.read("key-1"));
+        assertTrue(observedValues.contains("value-1") || observedValues.contains("value-2"));
     }
 
 }

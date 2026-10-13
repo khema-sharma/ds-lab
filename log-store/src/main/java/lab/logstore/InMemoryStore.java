@@ -10,7 +10,12 @@ public class InMemoryStore extends AbstractStore {
 
     private Map<String, String> store = new HashMap<>();
 
-    // Ensures read operation sees last complete write operation
+    // Ensures read operation sees last complete write operation through monitor
+    // lock guarantee.
+    //
+    // It ensures that a read operation waiting on a lock acquired by write
+    // operation will see the latest value written by the write operation
+    // when it releases the lock.
     private final Object readWriteMonitor = new Object();
 
     public void write(String key, String value) throws IOException {
