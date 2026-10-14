@@ -29,7 +29,6 @@ public class AppendOnlyLogStoreWriter implements Closeable {
         try {
             writer = initWriter();
             pos = Files.size(store.toPath());
-
         } catch (IOException e) {
             throw new StoreInitializationException(e);
         }

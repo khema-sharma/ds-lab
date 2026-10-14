@@ -10,18 +10,24 @@ import java.util.Map;
 import java.util.Optional;
 
 /**
- * AppendOnlyLogStore is a simple {@code(key, value)} store backed up by a single database file.
+ * AppendOnlyLogStore is a simple {@code(key, value)} store backed up by a
+ * single database file.
  * <p>
- * To create an instance of the store, one of the following constructors can be used:
+ * To create an instance of the store, one of the following constructors can be
+ * used:
  * <ul>
- *  <li>The {@link #AppendOnlyLogStore()} creates a store backed up by a temporary file
- *  <li>The {@link #AppendOnlyLogStore(String)} creates a stored backed up by the file located at given {@code path}
+ * <li>The {@link #AppendOnlyLogStore()} creates a store backed up by a
+ * temporary file
+ * <li>The {@link #AppendOnlyLogStore(String)} creates a stored backed up by the
+ * file located at given {@code path}
  * </ul>
  * <p>
  * Following methods allow to work with the store:
  * <ul>
- *  <li>The {@link #write(String, String)} method writes the given {@code(key, value)} pair to the store
- *  <li>The {@link #read(String)} method return the value of the given {@code key} from the store
+ * <li>The {@link #write(String, String)} method writes the given {@code(key,
+ * value)} pair to the store
+ * <li>The {@link #read(String)} method return the value of the given
+ * {@code key} from the store
  * </ul>
  */
 public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogStoreEntry>, Closeable {
@@ -47,7 +53,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
             throw new StoreInitializationException(
                     MessageFormat.format(ERR_IN_INIT, e.getMessage()), e);
         }
-        
+
         indexes = new HashMap<>();
 
         buildIndexes();
@@ -72,7 +78,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
         }
 
         Optional<LogStoreRecord> record = storeReader.readRecordAt(indexes.get(key));
-        
+
         return (record.isPresent() ? record.get().value() : null);
     }
 
@@ -99,7 +105,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
     private void initStore(String path) throws StoreInitializationException {
         try {
             store = (path == null ? File.createTempFile("write-ahead", ".db") : new File(path));
-            
+
             storeWriter = new AppendOnlyLogStoreWriter(store);
             storeReader = new AppendOnlyLogStoreReader(store);
         } catch (IOException fne) {
@@ -118,7 +124,6 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
             }
         }
     }
-
 
     public static void main(String[] args) {
         try (AppendOnlyLogStore store = new AppendOnlyLogStore()) {
