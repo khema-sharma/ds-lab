@@ -23,4 +23,4 @@ Any new write to the store, after building the intial index, will update the ind
 
 ### Latency target
 
-The store must respond to read calls, at 100 requests per second, within 200 milliseconds.
+99th percentile time of the store's read operation, at 100 requests per second, must be within 200 milliseconds.
