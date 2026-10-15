@@ -15,7 +15,7 @@ public class LogStoreTest {
     @Test
     public void acceptsValidWrites() throws StoreInitializationException, IOException {
         try (AppendOnlyLogStore store = new AppendOnlyLogStore()) {
-            createStoreAndAddRecords(store, new String[][] { { "key-1", "value-1" }, { "key-2", "value-2" } });
+            addRecords(store, new String[][] { { "key-1", "value-1" }, { "key-2", "value-2" } });
 
             assertEquals("value-1", store.read("key-1"));
             assertEquals("value-2", store.read("key-2"));
@@ -28,11 +28,11 @@ public class LogStoreTest {
 
         try (AppendOnlyLogStore store = new AppendOnlyLogStore()) {
             storePath = store.getPath();
-            createStoreAndAddRecords(store, new String[][] { { "key-1", "value-1" } });
+            addRecords(store, new String[][] { { "key-1", "value-1" } });
         }
 
         try (AppendOnlyLogStore store = new AppendOnlyLogStore(storePath)) {
-            createStoreAndAddRecords(store, new String[][] { { "key-2", "value-2" } });
+            addRecords(store, new String[][] { { "key-2", "value-2" } });
 
             assertEquals("value-1", store.read("key-1"));
             assertEquals("value-2", store.read("key-2"));
@@ -46,7 +46,7 @@ public class LogStoreTest {
         try (AppendOnlyLogStore store = new AppendOnlyLogStore()) {
             storePath = store.getPath();
 
-            createStoreAndAddRecords(store, new String[][] { { "key-1", "value-1" }, { "key-2", "value-2" } });
+            addRecords(store, new String[][] { { "key-1", "value-1" }, { "key-2", "value-2" } });
             tearRecord(storePath, 35);
         }
 
@@ -59,7 +59,7 @@ public class LogStoreTest {
     @Test
     public void acceptsLatestWrite() throws StoreInitializationException, IOException {
         try (AppendOnlyLogStore store = new AppendOnlyLogStore()) {
-            createStoreAndAddRecords(store, new String[][] { { "key-1", "value-1" }, { "key-1", "value-2" } });
+            addRecords(store, new String[][] { { "key-1", "value-1" }, { "key-1", "value-2" } });
             assertEquals("value-2", store.read("key-1"));
         }
     }
@@ -71,12 +71,25 @@ public class LogStoreTest {
         try (AppendOnlyLogStore store = new AppendOnlyLogStore()) {
             storePath = store.getPath();
 
-            createStoreAndAddRecords(store, new String[][] { { "key-1", "value-1" }, { "key-1", "value-2" } });
+            addRecords(store, new String[][] { { "key-1", "value-1" }, { "key-1", "value-2" } });
             tearRecord(storePath, 50);
         }
 
         try (AppendOnlyLogStore store = new AppendOnlyLogStore(storePath)) {
             assertEquals("value-1", store.read("key-1"));
+        }
+    }
+
+    @Test
+    public void acceptsReplicatedWrite() throws StoreInitializationException, IOException, InterruptedException {
+        try (AppendOnlyLogStore leader = new AppendOnlyLogStore()) {
+            try (AppendOnlyLogStore follower = new AppendOnlyLogStore(LogStoreRole.FOLLOWER)) {
+                leader.registerFollower(follower);
+                leader.write("key-1", "value-1");
+
+                Thread.sleep(1000);
+                assertEquals("value-1", follower.read("key-1"));
+            }
         }
     }
 
@@ -89,7 +102,7 @@ public class LogStoreTest {
         Files.writeString(storePathObject, tornContents, StandardCharsets.UTF_8);
     }
 
-    private void createStoreAndAddRecords(AppendOnlyLogStore store, String[][] records)
+    private void addRecords(AppendOnlyLogStore store, String[][] records)
             throws StoreInitializationException, IOException {
         for (String[] record : records) {
             store.write(record[0], record[1]);

@@ -2,7 +2,7 @@
 
 ## Problem
 
-This repository is a lab for durable key-value store. The first module is `log-store`. Today it only defines three properties, a Lamport clock and an reliable append-only log store which rejects torn records.
+This repository is a lab for durable key-value store. The first module is `log-store`. Today it only defines three properties, a Lamport clock and a reliable append-only log store which rejects torn records.
 
 ## Design
 
@@ -10,12 +10,15 @@ The parent build uses Java21.
 
 ### log-store module
 
-The `log-store` contains:
+The `log-store` module implements the durable key-value store. The following table defines the major components:
 
 - [Property](./log-store/src/main/java/lab/logstore/Property.java) and [PropertyDefinition](./log-store/src/main/java/lab/logstore/PropertyDefinition.java)
   - A `PropertyDefinition` cannot be constructed with a blank metric, unit, target, or failure. The three values are in [Glossary](./docs/glossary.md)
 - [InMemoryStore](./log-store/src/main/java/lab/logstore/InMemoryStore.java) is a hash map based memory store
-- [AppendOnlyLogStore](./log-store/src/main/java/lab/logstore/AppendOnlyLogStore.java) is a file based append only log store
+- [AppendOnlyLogStore](./log-store/src/main/java/lab/logstore/AppendOnlyLogStore.java) is a file based append only log store which:
+  - Can be set up as either leader or a follower
+    - Leader store replicates records to all its followers asynchronously
+    - Follower store will eventually reach consistency with leader store
   - If a crash results in torn records then the AppendOnlyStore still boots up and rejects only the torn records
   - Records which are intact can still be accessed
   - It maintains an key indexes so that values are read by directly jumping to the offset where the record exists
@@ -38,6 +41,7 @@ The [AppendOnlyLogStore](./log-store/src/main/java/lab/logstore/AppendOnlyLogSto
 - Rejects a torn record
 - Accepts latest value of a key
 - Accepts old value of a key if record containing latest value is torn
+- Accepts replicated record from a follower node
 
 ## How to run the tests
 

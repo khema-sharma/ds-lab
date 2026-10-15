@@ -4,10 +4,14 @@ import java.io.Closeable;
 import java.io.File;
 import java.io.IOException;
 import java.text.MessageFormat;
-import java.util.HashMap;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
+import java.util.LinkedList;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /**
  * AppendOnlyLogStore is a simple {@code(key, value)} store backed up by a
@@ -39,13 +43,27 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
     private AppendOnlyLogStoreWriter storeWriter;
     private AppendOnlyLogStoreReader storeReader;
 
+    private final LogStoreRole role;
     private final Map<String, Long> indexes;
 
+    private AppendOnlyLogStore electedLeader;
+    
+    private final List<AppendOnlyLogStore> followers;
+    private final ExecutorService replicatorService;
+
     public AppendOnlyLogStore() throws StoreInitializationException {
-        this(null);
+        this((String) null);
+    }
+
+    public AppendOnlyLogStore(LogStoreRole role) throws StoreInitializationException {
+        this(null, role);
     }
 
     public AppendOnlyLogStore(String path) throws StoreInitializationException {
+        this(path, LogStoreRole.LEADER);
+    }
+
+    public AppendOnlyLogStore(String path, LogStoreRole storeRole) throws StoreInitializationException {
         try {
             initStore(path);
 
@@ -54,7 +72,10 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
                     MessageFormat.format(ERR_IN_INIT, e.getMessage()), e);
         }
 
-        indexes = new HashMap<>();
+        role = (storeRole == null ? LogStoreRole.FOLLOWER : storeRole);
+        indexes = new LinkedHashMap<>();
+        followers = new LinkedList<>();
+        replicatorService = Executors.newSingleThreadExecutor();
 
         buildIndexes();
 
@@ -65,6 +86,10 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
     public void write(String key, String value) throws IOException {
         LogStoreEntry storeEntry = storeWriter.insertRecord(key, value);
         indexes.put(key, storeEntry.offset());
+
+        if (isLeader()) {
+            replicateRecordToFollowers(storeEntry.record());
+        }
     }
 
     @Override
@@ -102,6 +127,27 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
         return store.getAbsolutePath();
     }
 
+    public void registerFollower(AppendOnlyLogStore follower) {
+        if (!followers.contains(follower)) {
+            follower.setLeader(this);
+            followers.add(follower);
+        }
+    }
+
+    public void replicateRecord(LogStoreRecord record) throws IOException {
+        write(record.key(), record.value());
+    }
+
+    public void setLeader(AppendOnlyLogStore store) {
+        if (store == null) {
+            throw new IllegalArgumentException("Leader cannot be null.");
+        }
+
+        if (isFollower()) {
+            electedLeader = store;
+        }
+    }
+
     private void initStore(String path) throws StoreInitializationException {
         try {
             store = (path == null ? File.createTempFile("write-ahead", ".db") : new File(path));
@@ -123,6 +169,30 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
                 indexes.put(storeEntry.record().key(), storeEntry.offset());
             }
         }
+    }
+
+    private void replicateRecordToFollowers(LogStoreRecord record) {
+        if (!isLeader()) {
+            throw new IllegalStateException();
+        }
+
+        for (AppendOnlyLogStore follower : followers) {
+            replicatorService.submit(() -> {
+                try {
+                    follower.replicateRecord(record);
+                } catch (IOException e) {
+                    e.printStackTrace();
+                }
+            });
+        }
+    }
+
+    private boolean isLeader() {
+        return LogStoreRole.LEADER.equals(role);
+    }
+
+    private boolean isFollower() {
+        return LogStoreRole.FOLLOWER.equals(role);
     }
 
     public static void main(String[] args) {
