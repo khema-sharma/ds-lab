@@ -43,11 +43,13 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
     private AppendOnlyLogStoreWriter storeWriter;
     private AppendOnlyLogStoreReader storeReader;
 
-    private final LogStoreRole role;
     private final Map<String, Long> indexes;
 
+    private volatile LogStoreRole role;
+    private volatile int replicationTerm;
+
     private AppendOnlyLogStore electedLeader;
-    
+
     private final List<AppendOnlyLogStore> followers;
     private final ExecutorService replicatorService;
 
@@ -72,11 +74,12 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
                     MessageFormat.format(ERR_IN_INIT, e.getMessage()), e);
         }
 
-        role = (storeRole == null ? LogStoreRole.FOLLOWER : storeRole);
-        indexes = new LinkedHashMap<>();
-        followers = new LinkedList<>();
-        replicatorService = Executors.newSingleThreadExecutor();
+        seteRole(storeRole);
 
+        followers = new LinkedList<>();
+        replicatorService = Executors.newFixedThreadPool(5);
+
+        indexes = new LinkedHashMap<>();
         buildIndexes();
 
         System.out.println("Created store at: " + store.getAbsolutePath());
@@ -84,12 +87,15 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
 
     @Override
     public void write(String key, String value) throws IOException {
-        LogStoreEntry storeEntry = storeWriter.insertRecord(key, value);
-        indexes.put(key, storeEntry.offset());
+        if (isFollower()) {
+            if (electedLeader != null) {
+                electedLeader.writeRecord(key, value);
+            }
 
-        if (isLeader()) {
-            replicateRecordToFollowers(storeEntry.record());
+            return;
         }
+
+        writeRecord(key, value);
     }
 
     @Override
@@ -127,24 +133,45 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
         return store.getAbsolutePath();
     }
 
+    public void becomeLeader() {
+        seteRole(LogStoreRole.LEADER);
+    }
+
     public void registerFollower(AppendOnlyLogStore follower) {
         if (!followers.contains(follower)) {
-            follower.setLeader(this);
+            follower.setElectedLeader(this);
             followers.add(follower);
         }
     }
 
-    public void replicateRecord(LogStoreRecord record) throws IOException {
-        write(record.key(), record.value());
+    public void replicateRecord(int leaderTerm, LogStoreRecord record) throws IOException {
+        if (replicationTerm > leaderTerm) {
+            System.err.println("Current term " + replicationTerm + " greater than the received term " + leaderTerm);
+            System.err.println("Rejecting the replication request.");
+
+            return;
+        }
+
+        writeRecord(record.key(), record.value());
     }
 
-    public void setLeader(AppendOnlyLogStore store) {
-        if (store == null) {
+    private void setElectedLeader(AppendOnlyLogStore leader) {
+        if (leader == null) {
             throw new IllegalArgumentException("Leader cannot be null.");
         }
 
         if (isFollower()) {
-            electedLeader = store;
+            electedLeader = leader;
+            replicationTerm = leader.replicationTerm;
+        }
+    }
+
+    private void writeRecord(String key, String value) throws IOException {
+        LogStoreEntry storeEntry = storeWriter.insertRecord(key, value);
+        indexes.put(key, storeEntry.offset());
+
+        if (isLeader()) {
+            replicateRecordToFollowers(storeEntry.record());
         }
     }
 
@@ -157,6 +184,12 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
         } catch (IOException fne) {
             throw new StoreInitializationException(fne);
         }
+    }
+
+    private void seteRole(LogStoreRole storeRole) {
+        role = (storeRole == null ? LogStoreRole.FOLLOWER : storeRole);
+        replicationTerm = (role == LogStoreRole.LEADER ? ReplicationState.getNextTerm() : 0);
+        electedLeader = null;
     }
 
     private void buildIndexes() {
@@ -179,7 +212,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
         for (AppendOnlyLogStore follower : followers) {
             replicatorService.submit(() -> {
                 try {
-                    follower.replicateRecord(record);
+                    follower.replicateRecord(replicationTerm, record);
                 } catch (IOException e) {
                     e.printStackTrace();
                 }

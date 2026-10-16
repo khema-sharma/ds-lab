@@ -93,6 +93,42 @@ public class LogStoreTest {
         }
     }
 
+    @Test
+    public void rejectsReplicationFromFailOver()
+            throws StoreInitializationException, IOException, InterruptedException {
+        try (AppendOnlyLogStore leader = new AppendOnlyLogStore()) {
+            try (AppendOnlyLogStore followerA = new AppendOnlyLogStore(LogStoreRole.FOLLOWER)) {
+                try (AppendOnlyLogStore followerB = new AppendOnlyLogStore(LogStoreRole.FOLLOWER)) {
+                    leader.registerFollower(followerA);
+                    leader.registerFollower(followerB);
+
+                    leader.write("key-1", "value-1");
+
+                    Thread.sleep(200);
+                    
+                    assertEquals("value-1", followerA.read("key-1"));
+                    assertEquals("value-1", followerB.read("key-1"));
+
+                    followerA.becomeLeader();
+                    followerA.registerFollower(followerB);
+
+                    followerA.write("key-2", "value-2");
+
+                    Thread.sleep(200);
+
+                    assertEquals("value-2", followerB.read("key-2"));
+
+                    leader.write("key-3", "value-3");
+
+                    Thread.sleep(200);
+
+                    assertEquals(null, followerA.read("key-3"));
+                    assertEquals(null, followerB.read("key-3"));
+                }
+            }
+        }
+    }
+
     private void tearRecord(String storePath, int retainTill) throws IOException {
         Path storePathObject = Path.of(URI.create("file:///" + storePath));
 
