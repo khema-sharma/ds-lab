@@ -1,6 +1,7 @@
 package lab.logstore;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import java.io.IOException;
 import java.net.URI;
@@ -118,12 +119,8 @@ public class LogStoreTest {
 
                     assertEquals("value-2", followerB.read("key-2"));
 
-                    leader.write("key-3", "value-3");
-
-                    Thread.sleep(200);
-
-                    assertEquals(null, followerA.read("key-3"));
-                    assertEquals(null, followerB.read("key-3"));
+                    assertThrows(IllegalStateException.class, 
+                        () -> leader.write("key-3", "value-3") );
                 }
             }
         }

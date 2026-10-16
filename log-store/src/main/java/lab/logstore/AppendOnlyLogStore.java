@@ -167,6 +167,17 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
     }
 
     private void writeRecord(String key, String value) throws IOException {
+        int activeReplTerm = ReplicationState.getCurrentTerm();
+
+        if (replicationTerm < activeReplTerm) {
+            System.err
+                    .println(MessageFormat.format("Active replication term, {0}, is ahead of my replication term, {1}.",
+                            activeReplTerm, replicationTerm));
+            System.err.println("Cannot process write request!");
+
+            throw new IllegalStateException();
+        }
+
         LogStoreEntry storeEntry = storeWriter.insertRecord(key, value);
         indexes.put(key, storeEntry.offset());
 
