@@ -134,6 +134,8 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
     public void close() throws IOException {
         storeWriter.close();
         storeReader.close();
+        
+        replicatorService.shutdownNow();
     }
 
     @Override
