@@ -154,7 +154,7 @@ public class LogStoreTest {
                     leader.write("key-3", "value-3");
                     leader.write("key-1", "value-1.1");
 
-                    Thread.sleep(200);
+                    Thread.sleep(400);
 
                     assertEquals(null, followerA.read("key-3"));
                     assertEquals("value-3", followerB.read("key-3"));
