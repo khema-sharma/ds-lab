@@ -2,7 +2,7 @@
 
 ## Problem
 
-This repository is a lab for durable key-value store. The store is an append-only file. The log is the source of truth. The store adopts Single Leader Replication strategy to maintain copies of its data. It does not have a second log and it does not use a corum to commit reads or writes.
+This repository is a lab for durable key-value store. The store is an append-only file. The log is the source of truth. The store adopts Single Leader Replication strategy to maintain copies of its data. It does not have a second log and it does not use a quorum to commit reads or writes.
 
 ## Design
 
@@ -16,11 +16,11 @@ A store can act as a leader or as a follower. Leader store appends the write ope
 
 ### Term
 
-Leader store gets a replication term on its construction, or when a follower store is made a leader, from a central replication state. Replication term only increments. Store, be it a follower or a lader, rejects a write if its current term is lesser than the current replication term in use (to avoid split-brains).
+Leader store gets a replication term on its construction, or when a follower store is made a leader, from a central replication state. Replication term only increments. Store, be it a follower or a leader, rejects a write if its current term is lesser than the current replication term in use (to avoid split-brains).
 
 ### Partition
 
-The `partitionFollower` method marks one follower as partioned from the leader. The leader skips replication on partitioned follower. The partitioned follower rejects (throws exception) any writes. Reads on it still return the last value it has.
+The `partitionFollower` method marks one follower as partitioned from the leader. The leader skips replication on partitioned follower. The partitioned follower rejects (throws exception) any writes. Reads on it still return the last value it has.
 
 ### Property and property definition
 
@@ -37,7 +37,7 @@ The store handles following failure modes:
 - It rejects torn write at the tail
 - It accepts last complete value of a write
 - It rejects write from an old leader (failover)
-- It skips partioned follower
+- It skips partitioned follower
   - Partitioned follower rejects write
 
 ## Measurements
@@ -54,10 +54,6 @@ The below table summarizes the load test run on day-02.
 | Map get | 0.000083 ms | 0.000250 ms |
 | File write | 0.001792 ms | 0.003250 ms |
 | File read | 1.915208 ms | 3.632250 ms |
-
->Note:
->
->Each file read starts at the first line and reads forward until it finds the requested key. A key written near the end of the file therefore takes longer than a key written near the start. The 99th percentile is the time for one of those late keys, not the time for a read that can jump directly to the record.
 
 ## Load
 
