@@ -106,7 +106,7 @@ public class LogStoreTest {
                     leader.write("key-1", "value-1");
 
                     Thread.sleep(200);
-                    
+
                     assertEquals("value-1", followerA.read("key-1"));
                     assertEquals("value-1", followerB.read("key-1"));
 
@@ -119,8 +119,51 @@ public class LogStoreTest {
 
                     assertEquals("value-2", followerB.read("key-2"));
 
-                    assertThrows(IllegalStateException.class, 
-                        () -> leader.write("key-3", "value-3") );
+                    assertThrows(IllegalStateException.class,
+                            () -> leader.write("key-3", "value-3"));
+                }
+            }
+        }
+    }
+
+    @Test
+    public void rejectsPartitionedFollower() throws StoreInitializationException, IOException, InterruptedException {
+        try (AppendOnlyLogStore leader = new AppendOnlyLogStore()) {
+            try (AppendOnlyLogStore followerA = new AppendOnlyLogStore(LogStoreRole.FOLLOWER)) {
+                try (AppendOnlyLogStore followerB = new AppendOnlyLogStore(LogStoreRole.FOLLOWER)) {
+                    leader.registerFollower(followerA);
+                    leader.registerFollower(followerB);
+
+                    leader.write("key-1", "value-1");
+
+                    Thread.sleep(200);
+
+                    assertEquals("value-1", followerA.read("key-1"));
+                    assertEquals("value-1", followerB.read("key-1"));
+
+                    followerA.write("key-2", "value-2");
+
+                    Thread.sleep(200);
+
+                    assertEquals("value-2", leader.read("key-2"));
+                    assertEquals("value-2", followerA.read("key-2"));
+                    assertEquals("value-2", followerB.read("key-2"));
+
+                    leader.partitionFollower(followerA);
+
+                    leader.write("key-3", "value-3");
+                    leader.write("key-1", "value-1.1");
+
+                    Thread.sleep(200);
+
+                    assertEquals(null, followerA.read("key-3"));
+                    assertEquals("value-3", followerB.read("key-3"));
+                    assertEquals("value-1.1", followerB.read("key-1"));
+                    assertEquals("value-1", followerA.read("key-1"));
+
+                    assertThrows(IllegalStateException.class,
+                            () -> followerA.write("key-4", "value-4"),
+                            () -> "ERR-PART: Unable to write value.");
                 }
             }
         }

@@ -24,4 +24,4 @@ All the read operations on the partitioned follower will still continue. However
 
 #### Write on the partitioned follower
 
-Clients that are connected to a partitioned follower will experience failures while trying to write values until partition is resolved. This happens because the follower node will not be able to forward the request to the leader.
+Clients that are connected to a partitioned follower will experience failures while trying to write values until partition is resolved. This happens because the follower node will not be able to forward the request to the leader. A partitioned leader throws `ERR-PART: Unable to write value.` error to clients attempting write operation.

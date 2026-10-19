@@ -10,6 +10,7 @@ import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Map.Entry;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -47,8 +48,10 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
 
     private volatile LogStoreRole role;
     private volatile int replicationTerm;
+    private volatile boolean partitioned;
+    private volatile AppendOnlyLogStore leader;
 
-    private final List<AppendOnlyLogStore> followers;
+    private final Map<AppendOnlyLogStore, Boolean> followerStatusMap;
     private final ExecutorService replicatorService;
 
     public AppendOnlyLogStore() throws StoreInitializationException {
@@ -74,7 +77,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
 
         seteRole(storeRole);
 
-        followers = new LinkedList<>();
+        followerStatusMap = new LinkedHashMap<>();
         replicatorService = Executors.newFixedThreadPool(5);
 
         indexes = new LinkedHashMap<>();
@@ -86,7 +89,12 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
     @Override
     public void write(String key, String value) throws IOException {
         if (isFollower()) {
-            return;
+            if (!partitioned) {
+                leader.write(key, value);
+                return;
+            }
+
+            throw new IllegalStateException("ERR-PART: Unable to write value.");
         }
 
         int activeReplTerm = ReplicationState.getCurrentTerm();
@@ -140,11 +148,13 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
 
     public void becomeLeader() {
         seteRole(LogStoreRole.LEADER);
+        leader = null;
     }
 
     public void registerFollower(AppendOnlyLogStore follower) {
-        if (!followers.contains(follower)) {
-            followers.add(follower);
+        if (!followerStatusMap.containsKey(follower)) {
+            followerStatusMap.put(follower, Boolean.TRUE);
+            follower.setLeader(this);
         }
     }
 
@@ -159,6 +169,35 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
         }
 
         writeRecord(record.key(), record.value());
+    }
+
+    public void partitionFollower(AppendOnlyLogStore follower) {
+        if (follower == null) {
+            throw new IllegalArgumentException("Follower cannot be null.");
+        }
+
+        if (!followerStatusMap.containsKey(follower)) {
+            throw new IllegalArgumentException("Not a registered follower.");
+        }
+
+        followerStatusMap.put(follower, Boolean.FALSE);
+        follower.togglePartitioned();
+    }
+
+    private void setLeader(AppendOnlyLogStore leader) {
+        if (leader == null) {
+            throw new IllegalArgumentException("Leader cannot be null.");
+        }
+
+        if (leader == this) {
+            return;
+        }
+
+        this.leader = leader;
+    }
+
+    private void togglePartitioned() {
+        partitioned = !partitioned;
     }
 
     private void writeRecord(String key, String value) throws IOException {
@@ -203,10 +242,14 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
             throw new IllegalStateException();
         }
 
-        for (AppendOnlyLogStore follower : followers) {
+        for (Entry<AppendOnlyLogStore, Boolean> followerSet : followerStatusMap.entrySet()) {
+            if (!followerSet.getValue()) {
+                continue;
+            }
+
             replicatorService.submit(() -> {
                 try {
-                    follower.replicateRecord(replicationTerm, record);
+                    followerSet.getKey().replicateRecord(replicationTerm, record);
                 } catch (IOException e) {
                     e.printStackTrace();
                 }
