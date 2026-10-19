@@ -48,8 +48,6 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
     private volatile LogStoreRole role;
     private volatile int replicationTerm;
 
-    private AppendOnlyLogStore electedLeader;
-
     private final List<AppendOnlyLogStore> followers;
     private final ExecutorService replicatorService;
 
@@ -88,11 +86,18 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
     @Override
     public void write(String key, String value) throws IOException {
         if (isFollower()) {
-            if (electedLeader != null) {
-                electedLeader.writeRecord(key, value);
-            }
-
             return;
+        }
+
+        int activeReplTerm = ReplicationState.getCurrentTerm();
+
+        if (replicationTerm < activeReplTerm) {
+            System.err
+                    .println(MessageFormat.format("Active replication term, {0}, is ahead of my replication term, {1}.",
+                            activeReplTerm, replicationTerm));
+            System.err.println("Cannot process write request!");
+
+            throw new IllegalStateException();
         }
 
         writeRecord(key, value);
@@ -139,14 +144,15 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
 
     public void registerFollower(AppendOnlyLogStore follower) {
         if (!followers.contains(follower)) {
-            follower.setElectedLeader(this);
             followers.add(follower);
         }
     }
 
     public void replicateRecord(int leaderTerm, LogStoreRecord record) throws IOException {
-        if (replicationTerm > leaderTerm) {
-            System.err.println("Current term " + replicationTerm + " greater than the received term " + leaderTerm);
+        int latestTerm = ReplicationState.getCurrentTerm();
+
+        if (latestTerm > leaderTerm) {
+            System.err.println("Current term, " + latestTerm + " greater than the received term " + leaderTerm);
             System.err.println("Rejecting the replication request.");
 
             return;
@@ -155,29 +161,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
         writeRecord(record.key(), record.value());
     }
 
-    private void setElectedLeader(AppendOnlyLogStore leader) {
-        if (leader == null) {
-            throw new IllegalArgumentException("Leader cannot be null.");
-        }
-
-        if (isFollower()) {
-            electedLeader = leader;
-            replicationTerm = leader.replicationTerm;
-        }
-    }
-
     private void writeRecord(String key, String value) throws IOException {
-        int activeReplTerm = ReplicationState.getCurrentTerm();
-
-        if (replicationTerm < activeReplTerm) {
-            System.err
-                    .println(MessageFormat.format("Active replication term, {0}, is ahead of my replication term, {1}.",
-                            activeReplTerm, replicationTerm));
-            System.err.println("Cannot process write request!");
-
-            throw new IllegalStateException();
-        }
-
         LogStoreEntry storeEntry = storeWriter.insertRecord(key, value);
         indexes.put(key, storeEntry.offset());
 
@@ -200,7 +184,6 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
     private void seteRole(LogStoreRole storeRole) {
         role = (storeRole == null ? LogStoreRole.FOLLOWER : storeRole);
         replicationTerm = (role == LogStoreRole.LEADER ? ReplicationState.getNextTerm() : 0);
-        electedLeader = null;
     }
 
     private void buildIndexes() {
