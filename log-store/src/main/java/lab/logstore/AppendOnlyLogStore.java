@@ -6,11 +6,9 @@ import java.io.IOException;
 import java.text.MessageFormat;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
-import java.util.LinkedList;
-import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.Map.Entry;
+import java.util.Optional;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -129,6 +127,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
     @Override
     public void clear() throws IOException {
         storeWriter.clear();
+        indexes.clear();
     }
 
     @Override
