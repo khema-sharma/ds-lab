@@ -2,58 +2,49 @@
 
 ## Problem
 
-This repository is a lab for durable key-value store. The first module is `log-store`. Today it only defines three properties, a Lamport clock and a reliable append-only log store which rejects torn records.
+This repository is a lab for durable key-value store. The store is an append-only file. The log is the source of truth. The store adopts Single Leader Replication strategy to maintain copies of its data. It does not have a second log and it does not use a corum to commit reads or writes.
 
 ## Design
 
-The parent build uses Java21.
+### Record
 
-### log-store module
+A record in the store is a length, a checksum, and a key-value pair. The store rejects a broken record at the tail. Earlier records stay readable. The store also maintains indexes of records. The index maps key to the offset of the latest complete record in the file. It is rebuilt on open and updated on write operation.
 
-The `log-store` module implements the durable key-value store. The following table defines the major components:
+### Roles and acknowledgement
 
-- [Property](./log-store/src/main/java/lab/logstore/Property.java) and [PropertyDefinition](./log-store/src/main/java/lab/logstore/PropertyDefinition.java)
-  - A `PropertyDefinition` cannot be constructed with a blank metric, unit, target, or failure. The three values are in [Glossary](./docs/glossary.md)
-- [InMemoryStore](./log-store/src/main/java/lab/logstore/InMemoryStore.java) is a hash map based memory store
-- [AppendOnlyLogStore](./log-store/src/main/java/lab/logstore/AppendOnlyLogStore.java) is a file based append only log store which:
-  - Can be set up as either leader or a follower
-    - Leader store replicates records to all its followers asynchronously
-    - Follower store will eventually reach consistency with leader store
-  - If a crash results in torn records then the AppendOnlyStore still boots up and rejects only the torn records
-  - Records which are intact can still be accessed
-  - It maintains an key indexes so that values are read by directly jumping to the offset where the record exists
-- [LamportClock](./log-store/src/main/java/lab/logstore/LamportClock.java) which maintainer logical forward-only counter
-  - It adjusts the counter whenever an event is received in a distributed process holding this clock
-- [DistributedProcess](./log-store/src/main/java/lab/logstore/DistributedProcess.java) which mimics a process running on a distributed node
-  - [Event](./log-store/src/main/java/lab/logstore/Event.java) represents an event generated in a distributed node
+A store can act as a leader or as a follower. Leader store appends the write operation and replicates the record to its followers. Replication is asynchronous, so write returns after the leader has appended the record.
+
+### Term
+
+Leader store gets a replication term on its construction, or when a follower store is made a leader, from a central replication state. Replication term only increments. Store, be it a follower or a lader, rejects a write if its current term is lesser than the current replication term in use (to avoid split-brains).
+
+### Partition
+
+The `partitionFollower` method marks one follower as partioned from the leader. The leader skips replication on partitioned follower. The partitioned follower rejects (throws exception) any writes. Reads on it still return the last value it has.
+
+### Property and property definition
+
+`Property` is the name: scalability, reliability, or maintainability. A `PropertyDefinition` cannot be constructed with a blank metric, unit, target, or failure. The three values are in [Glossary](./docs/glossary.md)
+
+### In-memory store
+
+In-memory store uses a map to store key-value pair. It is guarded for one writer and multiple readers by a single monitor lock.
 
 ## Failure modes
 
-The tests reject a blank metric, a blank unit, a blank target, and a blank failure.
+The store handles following failure modes:
 
-The [Lamport clock tests](./log-store/src/test/java/lab/logstore/LamportTest.java):
+- It rejects torn write at the tail
+- It accepts last complete value of a write
+- It rejects write from an old leader (failover)
+- It skips partioned follower
+  - Partitioned follower rejects write
 
-- Accepts ordered events on distributed processes when the processes communicate with each other
-- Accepts concurrent events when they happen without any communication between processes
-
-The [AppendOnlyLogStore](./log-store/src/main/java/lab/logstore/AppendOnlyLogStore.java)
-
-- Rejects a torn record
-- Accepts latest value of a key
-- Accepts old value of a key if record containing latest value is torn
-- Accepts replicated record from a follower node
-
-## How to run the tests
-
-From the repository root, run `./mvnw -B test` command. The GitHub workflow [Daily Build](./.github/workflows/ci.yaml) uses the same command on every push.
-
-## What would change at 10 times the load
-
-Load test with one caller at a time exists. It does not tell us what happens when 1,000 gets arrive each second. At that rate we would need a new measurement of the 99th percentile time, because the definition stored in memory has no clock and cannot answer the question.
-
-## Day 2 measurements
+## Measurements
 
 Load testing includes running 100,000 reads and writes on a map based store and a file based store and computing their median and 99th percentile time values.
+
+### Day 2 numbers
 
 The below table summarizes the load test run on day-02.
 
@@ -67,3 +58,11 @@ The below table summarizes the load test run on day-02.
 >Note:
 >
 >Each file read starts at the first line and reads forward until it finds the requested key. A key written near the end of the file therefore takes longer than a key written near the start. The 99th percentile is the time for one of those late keys, not the time for a read that can jump directly to the record.
+
+## Load
+
+The 99th percentile time of the store's read operation, at 100 requests per second, must be within 200 milliseconds. The current benchmark does not measure that.
+
+## How to run the tests
+
+From the repository root, run `./mvnw -B test` command. The GitHub workflow [Daily Build](./.github/workflows/ci.yaml) uses the same command on every push.

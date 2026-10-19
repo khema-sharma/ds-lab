@@ -95,7 +95,7 @@ public class LogStoreTest {
     }
 
     @Test
-    public void rejectsReplicationFromFailOver()
+    public void rejectsWriteFromFailOver()
             throws StoreInitializationException, IOException, InterruptedException {
         try (AppendOnlyLogStore leader = new AppendOnlyLogStore()) {
             try (AppendOnlyLogStore followerA = new AppendOnlyLogStore(LogStoreRole.FOLLOWER)) {

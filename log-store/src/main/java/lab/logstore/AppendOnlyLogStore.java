@@ -242,19 +242,19 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
             throw new IllegalStateException();
         }
 
-        for (Entry<AppendOnlyLogStore, Boolean> followerSet : followerStatusMap.entrySet()) {
-            if (!followerSet.getValue()) {
-                continue;
-            }
+        replicatorService.submit(() -> {
+            followerStatusMap.entrySet().parallelStream().forEach((Entry<AppendOnlyLogStore, Boolean> followerSet) -> {
+                if (!followerSet.getValue()) {
+                    return;
+                }
 
-            replicatorService.submit(() -> {
                 try {
                     followerSet.getKey().replicateRecord(replicationTerm, record);
                 } catch (IOException e) {
                     e.printStackTrace();
                 }
             });
-        }
+        });
     }
 
     private boolean isLeader() {
