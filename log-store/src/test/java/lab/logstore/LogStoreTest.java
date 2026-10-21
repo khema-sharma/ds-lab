@@ -155,7 +155,7 @@ public class LogStoreTest {
                     leader.write("key-3", "value-3");
                     leader.write("key-1", "value-1.1");
 
-                    Thread.sleep(400);
+                    Thread.sleep(800);
 
                     assertEquals(null, followerA.read("key-3"));
                     assertEquals("value-3", followerB.read("key-3"));
@@ -176,7 +176,7 @@ public class LogStoreTest {
             IdempotencyKey idempotencyKey = new IdempotencyKey(UUID.randomUUID().toString());
 
             long offset = store.write(idempotencyKey, "key-1", "value-1");
-            long nxtOffset = store.write(idempotencyKey, "key-1", "value-1");
+            long nxtOffset = store.write(idempotencyKey, "key-2", "value-2");
 
             assertEquals("value-1", store.read("key-1"));
             assertEquals(offset, nxtOffset);

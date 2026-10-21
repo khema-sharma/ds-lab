@@ -4,12 +4,12 @@ import java.io.Closeable;
 import java.io.File;
 import java.io.IOException;
 import java.text.MessageFormat;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Optional;
-import java.util.WeakHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -53,7 +53,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
     private final Map<AppendOnlyLogStore, Boolean> followerStatusMap;
     private final ExecutorService replicatorService;
 
-    private final Map<IdempotencyKey, Boolean> idempotentOps;
+    private final Map<IdempotencyKey, Long> idempotentOps;
 
     public AppendOnlyLogStore() throws StoreInitializationException {
         this((String) null);
@@ -81,7 +81,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
         followerStatusMap = new LinkedHashMap<>();
         replicatorService = Executors.newFixedThreadPool(5);
 
-        idempotentOps = new WeakHashMap<>();
+        idempotentOps = new HashMap<>();
 
         indexes = new LinkedHashMap<>();
         buildIndexes();
@@ -115,14 +115,16 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
     }
 
     public long write(IdempotencyKey idempotencyKey, String key, String value) throws IOException {
-        if (idempotentOps.containsKey(idempotencyKey) && idempotentOps.get(idempotencyKey)) {
-            return indexes.get("key-1");
+        if (idempotentOps.containsKey(idempotencyKey)) {
+            return idempotentOps.get(idempotencyKey);
         }
 
         write(key, value);
-        idempotentOps.put(idempotencyKey, Boolean.TRUE);
 
-        return indexes.get("key-1");
+        long writeOffset = indexes.get(key);
+        idempotentOps.put(idempotencyKey, writeOffset);
+
+        return writeOffset;
     }
 
     @Override
