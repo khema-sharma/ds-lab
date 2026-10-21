@@ -39,6 +39,7 @@ The store handles following failure modes:
 - It rejects write from an old leader (failover)
 - It skips partitioned follower
   - Partitioned follower rejects write
+- It rejects duplicate write with same idempotency key
 
 ## Measurements
 

@@ -8,6 +8,7 @@ import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.UUID;
 
 import org.junit.jupiter.api.Test;
 
@@ -166,6 +167,19 @@ public class LogStoreTest {
                             () -> "ERR-PART: Unable to write value.");
                 }
             }
+        }
+    }
+
+    @Test
+    public void rejectsDuplicateWrite() throws StoreInitializationException, IOException {
+        try (AppendOnlyLogStore store = new AppendOnlyLogStore()) {
+            IdempotencyKey idempotencyKey = new IdempotencyKey(UUID.randomUUID().toString());
+
+            long offset = store.write(idempotencyKey, "key-1", "value-1");
+            long nxtOffset = store.write(idempotencyKey, "key-1", "value-1");
+
+            assertEquals("value-1", store.read("key-1"));
+            assertEquals(offset, nxtOffset);
         }
     }
 

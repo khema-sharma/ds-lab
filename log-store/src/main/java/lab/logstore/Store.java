@@ -8,9 +8,8 @@ public interface Store {
      * retrieval.
      * 
      * @param key   Key using which the value can be retrieved
-     * @param value Value to saved in the store
-     * @throws IOException If there were any issues in saving given value in the
-     *                     store.
+     * @param value Value of the key to be saved in the store
+     * @throws IOException If there were any issues in saving given key-value pair.
      */
     public void write(String key, String value) throws IOException;
 

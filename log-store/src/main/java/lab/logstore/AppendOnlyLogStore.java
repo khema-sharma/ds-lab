@@ -9,6 +9,7 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Optional;
+import java.util.WeakHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -52,6 +53,8 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
     private final Map<AppendOnlyLogStore, Boolean> followerStatusMap;
     private final ExecutorService replicatorService;
 
+    private final Map<IdempotencyKey, Boolean> idempotentOps;
+
     public AppendOnlyLogStore() throws StoreInitializationException {
         this((String) null);
     }
@@ -77,6 +80,8 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
 
         followerStatusMap = new LinkedHashMap<>();
         replicatorService = Executors.newFixedThreadPool(5);
+
+        idempotentOps = new WeakHashMap<>();
 
         indexes = new LinkedHashMap<>();
         buildIndexes();
@@ -109,6 +114,17 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
         writeRecord(key, value);
     }
 
+    public long write(IdempotencyKey idempotencyKey, String key, String value) throws IOException {
+        if (idempotentOps.containsKey(idempotencyKey) && idempotentOps.get(idempotencyKey)) {
+            return indexes.get("key-1");
+        }
+
+        write(key, value);
+        idempotentOps.put(idempotencyKey, Boolean.TRUE);
+
+        return indexes.get("key-1");
+    }
+
     @Override
     public String read(String key) throws IOException {
         if (key == null || key.isBlank()) {
@@ -134,7 +150,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
     public void close() throws IOException {
         storeWriter.close();
         storeReader.close();
-        
+
         replicatorService.shutdownNow();
     }
 
