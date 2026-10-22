@@ -53,21 +53,32 @@ public class AppendOnlyLogStoreReader implements Closeable {
         return new AppendOnlyLogStoreIterator();
     }
 
-    public Optional<LogStoreRecord> readRecordAt(long offset) throws IOException {
+    public Optional<LogStoreRecord> readLogRecordAt(long offset) throws IOException {
+        Optional<LogStoreEntry> optionalEntry = readStoreEntryAt(offset);
+
+        return (!optionalEntry.isEmpty() ? Optional.of(optionalEntry.get().record()) : Optional.empty());
+    }
+
+    Optional<LogStoreEntry> readStoreEntryAt(long offset) throws IOException {
         storeAccessFile.seek(offset);
-
-        ReadStoreEntryResult result = readStoreEntryAt(offset, storeDataInput);
-
-        return (result.hasLogStoreEntry() ? Optional.of(result.getLogStoreEntry().record()) : Optional.empty());
+        return readStoreEntryAt(offset, storeDataInput).entry();
     }
 
     private ReadStoreEntryResult readStoreEntryAt(long offset, LogStoreDataInput input) throws IOException {
         Optional<LogStoreEntry> emptyEntry = Optional.empty();
 
-        StringBuffer lengthBuffer = new StringBuffer();
-
         long entryOffset = offset;
         int bytesRead = 0;
+
+        StringBuffer typeBuffer = new StringBuffer();
+
+        bytesRead += readStoreEntryItem(typeBuffer, input);
+
+        if (typeBuffer.isEmpty()) {
+            return new ReadStoreEntryResult(bytesRead, emptyEntry);
+        }
+
+        StringBuffer lengthBuffer = new StringBuffer();
 
         bytesRead += readStoreEntryItem(lengthBuffer, input);
 
@@ -82,6 +93,7 @@ public class AppendOnlyLogStoreReader implements Closeable {
             return new ReadStoreEntryResult(bytesRead, emptyEntry);
         }
 
+        byte type = Byte.valueOf(typeBuffer.toString());
         int length = Integer.valueOf(lengthBuffer.toString());
         long checksum = Long.valueOf(checksumBuffer.toString());
 
@@ -108,7 +120,8 @@ public class AppendOnlyLogStoreReader implements Closeable {
         String aKey = keyValuePair.substring(0, valueIndex);
         String keyValue = keyValuePair.substring(valueIndex + 1);
 
-        LogStoreEntry entry = new LogStoreEntry(entryOffset, length, actualChecksum, new LogStoreRecord(aKey, keyValue));
+        LogStoreEntry entry = new LogStoreEntry(entryOffset, type, length, actualChecksum,
+                new LogStoreRecord(aKey, keyValue));
 
         bytesRead += seekTillLineFeed(input);
 
@@ -200,12 +213,16 @@ public class AppendOnlyLogStoreReader implements Closeable {
     }
 
     private record ReadStoreEntryResult(long bytesRead, Optional<LogStoreEntry> entry) {
-        public boolean hasLogStoreEntry() {
-            return entry.isPresent();
+        public boolean isLogEntry() {
+            return (!isEmpty() && entry.get().type() == LogStoreEntry.TYPE_LOG_ENTRY);
         }
 
-        public LogStoreEntry getLogStoreEntry() {
-            return entry.get();
+        public boolean isCDCEntry() {
+            return (!isEmpty() && entry.get().type() == LogStoreEntry.TYPE_CDC_ENTRY);
+        }
+
+        public boolean isEmpty() {
+            return entry.isEmpty();
         }
     }
 
@@ -263,16 +280,22 @@ public class AppendOnlyLogStoreReader implements Closeable {
             }
 
             try {
-                long lastPos = pos;
+                ReadStoreEntryResult logResult = readStoreEntry();
 
-                ReadStoreEntryResult result = readStoreEntryAt(lastPos, this);
-                pos += result.bytesRead();
+                if (logResult.isLogEntry()) {
+                    ReadStoreEntryResult cdcResult = readStoreEntry();
 
-                if (pos == lastPos) {
+                    if (cdcResult.isCDCEntry()) {
+                        return logResult.entry();
+                    } else {
+                        pos = EOF;
+                    }
+                } else {
                     pos = EOF;
                 }
 
-                return result.entry();
+                return Optional.empty();
+
             } catch (IOException e) {
                 pos = EOF;
             } finally {
@@ -282,6 +305,19 @@ public class AppendOnlyLogStoreReader implements Closeable {
             }
 
             return null;
+        }
+
+        private ReadStoreEntryResult readStoreEntry() throws IOException {
+            long lastPos = pos;
+
+            ReadStoreEntryResult result = readStoreEntryAt(lastPos, this);
+            pos += result.bytesRead();
+
+            if (pos == lastPos) {
+                pos = EOF;
+            }
+
+            return result;
         }
 
     }

@@ -47,10 +47,14 @@ public class AppendOnlyLogStoreWriter implements Closeable {
     }
 
     public LogStoreEntry insertRecord(String key, String value) throws IOException {
-        return insertRecord(new LogStoreRecord(key, value));
+        return insertRecord(LogStoreEntry.TYPE_LOG_ENTRY, new LogStoreRecord(key, value));
     }
 
-    public LogStoreEntry insertRecord(LogStoreRecord record) throws IOException {
+    public LogStoreEntry insertCDCRecord(String key, String value) throws IOException {
+        return insertRecord(LogStoreEntry.TYPE_CDC_ENTRY, new LogStoreRecord(key, value));
+    }
+
+    private LogStoreEntry insertRecord(byte type, LogStoreRecord record) throws IOException {
         if (record == null) {
             throw new IllegalArgumentException("record cannot be null.");
         }
@@ -63,7 +67,7 @@ public class AppendOnlyLogStoreWriter implements Closeable {
         int length = record.getBytes().length;
         long checksum = crc32Checksum.getValue();
 
-        LogStoreEntry storeEntry = new LogStoreEntry(entryPos, length, checksum, record);
+        LogStoreEntry storeEntry = new LogStoreEntry(entryPos, type, length, checksum, record);
 
         String storeEntryString = storeEntry.toString() + AppendOnlyLogStoreReader.RECORD_SEP;
 

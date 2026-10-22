@@ -17,7 +17,7 @@ public class LogStoreTest {
     @Test
     public void acceptsValidWrites() throws StoreInitializationException, IOException {
         try (AppendOnlyLogStore store = new AppendOnlyLogStore()) {
-            addRecords(store, new String[][] { { "key-1", "value-1" }, { "key-2", "value-2" } });
+            insertRecords(store, new String[][] { { "key-1", "value-1" }, { "key-2", "value-2" } });
 
             assertEquals("value-1", store.read("key-1"));
             assertEquals("value-2", store.read("key-2"));
@@ -30,11 +30,11 @@ public class LogStoreTest {
 
         try (AppendOnlyLogStore store = new AppendOnlyLogStore()) {
             storePath = store.getPath();
-            addRecords(store, new String[][] { { "key-1", "value-1" } });
+            insertRecords(store, new String[][] { { "key-1", "value-1" } });
         }
 
         try (AppendOnlyLogStore store = new AppendOnlyLogStore(storePath)) {
-            addRecords(store, new String[][] { { "key-2", "value-2" } });
+            insertRecords(store, new String[][] { { "key-2", "value-2" } });
 
             assertEquals("value-1", store.read("key-1"));
             assertEquals("value-2", store.read("key-2"));
@@ -48,20 +48,19 @@ public class LogStoreTest {
         try (AppendOnlyLogStore store = new AppendOnlyLogStore()) {
             storePath = store.getPath();
 
-            addRecords(store, new String[][] { { "key-1", "value-1" }, { "key-2", "value-2" } });
-            tearRecord(storePath, 35);
+            insertRecords(store, new String[][] { { "key-1", "value-1" } });
+            tearTailRecord(store);
         }
 
         try (AppendOnlyLogStore store = new AppendOnlyLogStore(storePath)) {
-            assertEquals("value-1", store.read("key-1"));
-            assertEquals(null, store.read("key-2"));
+            assertEquals(null, store.read("key-1"));
         }
     }
 
     @Test
     public void acceptsLatestWrite() throws StoreInitializationException, IOException {
         try (AppendOnlyLogStore store = new AppendOnlyLogStore()) {
-            addRecords(store, new String[][] { { "key-1", "value-1" }, { "key-1", "value-2" } });
+            insertRecords(store, new String[][] { { "key-1", "value-1" }, { "key-1", "value-2" } });
             assertEquals("value-2", store.read("key-1"));
         }
     }
@@ -73,8 +72,8 @@ public class LogStoreTest {
         try (AppendOnlyLogStore store = new AppendOnlyLogStore()) {
             storePath = store.getPath();
 
-            addRecords(store, new String[][] { { "key-1", "value-1" }, { "key-1", "value-2" } });
-            tearRecord(storePath, 50);
+            insertRecords(store, new String[][] { { "key-1", "value-1" }, { "key-1", "value-2" } });
+            tearTailRecord(store);
         }
 
         try (AppendOnlyLogStore store = new AppendOnlyLogStore(storePath)) {
@@ -183,16 +182,51 @@ public class LogStoreTest {
         }
     }
 
-    private void tearRecord(String storePath, int retainTill) throws IOException {
-        Path storePathObject = Path.of(URI.create("file:///" + storePath));
+    @Test
+    public void rejectsRecordWithoutCDCWrite() throws StoreInitializationException, IOException {
+        String storePath = null;
+        
+        try (AppendOnlyLogStore store = new AppendOnlyLogStore()) {
+            storePath = store.getPath();
+            
+            insertRecords(store, new String[][] { { "key-1", "value-1" }, { "key-2", "value-2" } });
+            
+            assertEquals("value-1", store.read("key-1"));
+
+            tearTailCDCEntry(store);
+        }
+
+        try (AppendOnlyLogStore store = new AppendOnlyLogStore(storePath)) {
+            assertEquals("value-1", store.read("key-1"));
+            assertEquals(null, store.read("key-2"));
+        }
+    }
+
+    private void tearTailRecord(AppendOnlyLogStore store) throws IOException {
+        LogStoreEntry lastEntry = store.getLastEntry().get();
+        int endOffset = (int) lastEntry.offset() + (lastEntry.toString().length() - (lastEntry.length()/2));
+
+        Path storePathObject = Path.of(URI.create("file:///" + store.getPath()));
 
         String contents = Files.readString(storePathObject, StandardCharsets.UTF_8);
-        String tornContents = contents.substring(0, retainTill);
-
+        String tornContents = contents.substring(0, endOffset);
+        
         Files.writeString(storePathObject, tornContents, StandardCharsets.UTF_8);
     }
 
-    private void addRecords(AppendOnlyLogStore store, String[][] records)
+    private void tearTailCDCEntry(AppendOnlyLogStore store) throws IOException {
+        LogStoreEntry lastEntry = store.getLastEntry().get();
+        int endOffset = (int) (lastEntry.offset() + lastEntry.toString().length()) + 1;
+
+        Path storePathObject = Path.of(URI.create("file:///" + store.getPath()));
+
+        String contents = Files.readString(storePathObject, StandardCharsets.UTF_8);
+        String tornContents = contents.substring(0, endOffset);
+        
+        Files.writeString(storePathObject, tornContents, StandardCharsets.UTF_8);
+    }
+
+    private void insertRecords(AppendOnlyLogStore store, String[][] records)
             throws StoreInitializationException, IOException {
         for (String[] record : records) {
             store.write(record[0], record[1]);

@@ -40,6 +40,7 @@ The store handles following failure modes:
 - It skips partitioned follower
   - Partitioned follower rejects write
 - It rejects duplicate write with same idempotency key
+- It rejects write without a corresponding Outbox entry
 
 ## Measurements
 

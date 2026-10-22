@@ -4,6 +4,7 @@ import java.io.Closeable;
 import java.io.File;
 import java.io.IOException;
 import java.text.MessageFormat;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
@@ -137,7 +138,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
             return null;
         }
 
-        Optional<LogStoreRecord> record = storeReader.readRecordAt(indexes.get(key));
+        Optional<LogStoreRecord> record = storeReader.readLogRecordAt(indexes.get(key));
 
         return (record.isPresent() ? record.get().value() : null);
     }
@@ -203,6 +204,13 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
         follower.togglePartitioned();
     }
 
+    Optional<LogStoreEntry> getLastEntry() throws IOException {
+        Long[] offsets = indexes.values().toArray(new Long[0]);
+        Arrays.sort(offsets);
+        
+        return storeReader.readStoreEntryAt(offsets[offsets.length - 1]);
+    }
+
     private void setLeader(AppendOnlyLogStore leader) {
         if (leader == null) {
             throw new IllegalArgumentException("Leader cannot be null.");
@@ -221,10 +229,12 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
 
     private void writeRecord(String key, String value) throws IOException {
         LogStoreEntry storeEntry = storeWriter.insertRecord(key, value);
+        LogStoreEntry cdcEntry = storeWriter.insertCDCRecord(key, value);
+
         indexes.put(key, storeEntry.offset());
 
         if (isLeader()) {
-            replicateRecordToFollowers(storeEntry.record());
+            replicateRecordToFollowers(cdcEntry.record());
         }
     }
 
