@@ -160,8 +160,9 @@ public class LogStoreTest {
                     leader.partitionFollower(followerA);
 
                     leader.write("key-3", "value-3");
-                    leader.write("key-1", "value-1.1");
+                    leader.internalWaitTillReplicationsComplete();
 
+                    leader.write("key-1", "value-1.1");
                     leader.internalWaitTillReplicationsComplete();
 
                     assertEquals(null, followerA.read("key-3"));
