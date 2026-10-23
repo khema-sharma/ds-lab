@@ -8,8 +8,6 @@ import java.util.Iterator;
 import java.util.Optional;
 
 public class AppendOnlyLogStoreReader implements Closeable {
-    public static final String LOG_ENTRY_SEP = "\n";
-
     final File logStore;
     private final LogStoreEntryInput storeInput;
 

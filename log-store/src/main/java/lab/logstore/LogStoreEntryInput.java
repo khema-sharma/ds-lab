@@ -3,18 +3,14 @@ package lab.logstore;
 import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.IOException;
+import java.io.UnsupportedEncodingException;
+import java.nio.ByteBuffer;
 import java.util.Optional;
-import java.util.zip.CRC32;
-import java.util.zip.Checksum;
 
 public class LogStoreEntryInput extends RandomLogStoreAccess {
-    private static final int EOF = -1;
-
-    private final Checksum crc32Checksum;
 
     public LogStoreEntryInput(File file) throws FileNotFoundException {
         super(file, "r");
-        crc32Checksum = new CRC32();
     }
 
     public Optional<LogStoreEntrySet> getEntryAt(long offset) throws IOException {
@@ -49,48 +45,45 @@ public class LogStoreEntryInput extends RandomLogStoreAccess {
                 throw new IllegalStateException("Invalid record, checksum mismatch.");
             }
 
-            Optional<LogStoreRecord> record = LogStoreRecord.fromBytes(recordBytes);
+            Optional<LogStoreRecord> record = readLogStoreRecord(recordBytes);
             if (record.isEmpty()) {
-                throw new IllegalStateException("Could not construct record from its bytes.");
+                throw new IllegalStateException("Could not parse record from the stream.");
             }
 
             long entryLength = (pos() - entryOffset);
-
-            // Cross linefeed
-            read();
 
             return Optional.of(new LogStoreEntrySet(entryOffset, entryLength,
                     new LogStoreEntry(type, length, actualChecksum, record.get())));
 
         } catch (IllegalStateException ise) {
-            seekTillLineFeed();
             return Optional.empty();
         }
     }
 
-    private long getChecksum(byte[] contents) {
-        crc32Checksum.reset();
-        crc32Checksum.update(contents);
+    private Optional<LogStoreRecord> readLogStoreRecord(byte[] recordBytes) {
+        try {
 
-        return crc32Checksum.getValue();
-    }
+            String key = null;
+            String value = null;
 
-    private long seekTillLineFeed() throws IOException {
-        long bytesRead = 0;
+            ByteBuffer recordBuffer = ByteBuffer.wrap(recordBytes);
 
-        int nByte = read();
-        if (nByte != EOF) {
-            bytesRead++;
+            byte[] keyBytes = new byte[recordBuffer.getInt()];
+            recordBuffer.get(keyBytes);
+
+            key = new String(keyBytes, "utf-8");
+
+            byte[] valueBytes = new byte[recordBuffer.getInt()];
+            recordBuffer.get(valueBytes);
+
+            value = new String(valueBytes, "utf-8");
+
+            return Optional.of(new LogStoreRecord(key, value));
+
+        } catch (UnsupportedEncodingException e) {
         }
 
-        while (nByte != EOF && !Character.toString(nByte).equals(LogStoreEntry.LOG_ENTRY_SEP)) {
-            nByte = read();
-            if (nByte != EOF) {
-                bytesRead++;
-            }
-        }
-
-        return bytesRead;
+        return Optional.empty();
     }
 
 }

@@ -212,7 +212,7 @@ public class LogStoreTest {
     private void tearTailCDCEntry(AppendOnlyLogStore store) throws IOException {
         LogStoreEntrySet lastEntry = store.getLastEntry().get();
         
-        int entryEndOffset = (int) (lastEntry.offset() + lastEntry.length()) + LogStoreEntry.LOG_ENTRY_SEP.length();
+        int entryEndOffset = (int) (lastEntry.offset() + lastEntry.length());
         int cdcStartOffset = entryEndOffset;
 
         RandomAccessFile storeFile = new RandomAccessFile(store.getFile(), "rw");
