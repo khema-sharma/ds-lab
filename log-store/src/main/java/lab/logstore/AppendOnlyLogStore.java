@@ -4,20 +4,16 @@ import java.io.Closeable;
 import java.io.File;
 import java.io.IOException;
 import java.text.MessageFormat;
-import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
-import java.util.List;
 import java.util.Map;
-import java.util.Map.Entry;
 import java.util.Optional;
-import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ExecutionException;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
-import java.util.stream.Collectors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * AppendOnlyLogStore is a simple {@code(key, value)} store backed up by a
@@ -54,10 +50,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
 
     private volatile LogStoreRole role;
     private volatile int replicationTerm;
-    private volatile List<Future<Boolean>> replicationCallFutures;
-
     private volatile boolean partitioned;
-
     private volatile AppendOnlyLogStore leader;
 
     private final Map<AppendOnlyLogStore, Boolean> followerStatusMap;
@@ -65,6 +58,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
 
     private final Map<IdempotencyKey, LogRecordOffset> idempotentOps;
 
+    private final AtomicReference<CountDownLatch> replicationCallsWaitLatch;
     private final Object leaderReplicationMonitor;
 
     public AppendOnlyLogStore() throws StoreInitializationException {
@@ -94,7 +88,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
 
         followerStatusMap = new LinkedHashMap<>();
         replicatorService = Executors.newFixedThreadPool(5);
-        replicationCallFutures = new ArrayList<>();
+        replicationCallsWaitLatch = new AtomicReference<>(new CountDownLatch(0));
 
         idempotentOps = new ConcurrentHashMap<>();
         indexes = new ConcurrentHashMap<>();
@@ -204,19 +198,6 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
         }
     }
 
-    public void replicateRecord(int leaderTerm, LogStoreRecord record) throws IOException {
-        int latestTerm = ReplicationState.getCurrentTerm();
-
-        if (latestTerm > leaderTerm) {
-            System.err.println("Current term, " + latestTerm + " greater than the received term " + leaderTerm);
-            System.err.println("Rejecting the replication request.");
-
-            return;
-        }
-
-        writeRecord(record.key(), record.value());
-    }
-
     public void partitionFollower(AppendOnlyLogStore follower) {
         if (follower == null) {
             throw new IllegalArgumentException("Follower cannot be null.");
@@ -230,31 +211,21 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
         follower.togglePartitioned();
     }
 
+    void replicateRecord(int leaderTerm, LogStoreRecord record) throws IOException {
+        int latestTerm = ReplicationState.getCurrentTerm();
+
+        if (latestTerm > leaderTerm) {
+            System.err.println("Current term, " + latestTerm + " greater than the received term " + leaderTerm);
+            System.err.println("Rejecting the replication request.");
+
+            return;
+        }
+
+        writeRecord(record.key(), record.value());
+    }
+
     void internalWaitTillReplicationsComplete() throws InterruptedException {
-        Thread waitThread = new Thread() {
-            public void run() {
-                synchronized (leaderReplicationMonitor) {
-                    if (replicationCallFutures.isEmpty()) {
-                        return;
-                    }
-
-                    for (Future<Boolean> replFuture : replicationCallFutures) {
-                        try {
-                            if (!replFuture.isDone()) {
-                                replFuture.get();
-                            }
-                        } catch (InterruptedException | ExecutionException e) {
-                            e.printStackTrace();
-                        }
-                    }
-
-                    replicationCallFutures.clear();
-                }
-            }
-        };
-
-        waitThread.run();
-        waitThread.join(5000);
+        replicationCallsWaitLatch.get().await(5, TimeUnit.SECONDS);
     }
 
     Optional<LogStoreEntrySet> getLastEntry() throws IOException {
@@ -284,10 +255,8 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
         lastOffset = storeEntry.offset();
         indexes.put(key, lastOffset);
 
-        synchronized (leaderReplicationMonitor) {
-            if (isLeader()) {
-                replicateRecordToFollowers(cdcEntry.entry().record());
-            }
+        if (isLeader()) {
+            replicateRecordToFollowers(cdcEntry.entry().record());
         }
     }
 
@@ -327,27 +296,22 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
             throw new IllegalStateException();
         }
 
-        List<Callable<Boolean>> replicationCallables = followerStatusMap
-                .entrySet()
-                .parallelStream()
-                .map((Entry<AppendOnlyLogStore, Boolean> followerSet) -> {
-                    return new Callable<Boolean>() {
-                        @Override
-                        public Boolean call() throws Exception {
-                            if (!followerSet.getValue()) {
-                                return true;
-                            }
+        synchronized (leaderReplicationMonitor) {
+            replicationCallsWaitLatch.set(new CountDownLatch(followerStatusMap.size()));
 
-                            followerSet.getKey().replicateRecord(replicationTerm, record);
-                            return true;
-                        }
-                    };
-                })
-                .collect(Collectors.toList());
+            followerStatusMap.forEach((store, status) -> {
+                replicatorService.submit(() -> {
+                    if (!status) {
+                        return true;
+                    }
 
-        replicationCallables.forEach(callable -> {
-            replicationCallFutures.add(replicatorService.submit(callable));
-        });
+                    store.replicateRecord(replicationTerm, record);
+                    replicationCallsWaitLatch.get().countDown();
+
+                    return true;
+                });
+            });
+        }
     }
 
     private boolean isLeader() {
