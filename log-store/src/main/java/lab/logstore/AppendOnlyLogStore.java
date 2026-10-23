@@ -4,8 +4,9 @@ import java.io.Closeable;
 import java.io.File;
 import java.io.IOException;
 import java.text.MessageFormat;
-import java.util.Iterator;
 import java.util.LinkedHashMap;
+import java.util.LinkedList;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
@@ -14,6 +15,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Function;
 
 /**
  * AppendOnlyLogStore is a simple {@code(key, value)} store backed up by a
@@ -36,7 +38,7 @@ import java.util.concurrent.atomic.AtomicReference;
  * {@code key} from the store
  * </ul>
  */
-public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogStoreEntrySet>, Closeable {
+public class AppendOnlyLogStore extends AbstractStore implements Closeable {
 
     private static final String ERR_IN_INIT = "An error occurred while initializing store: {0}";
 
@@ -47,6 +49,9 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
 
     private final Map<String, Long> indexes;
     private long lastOffset;
+
+    private final Map<String, Boolean> outboxEntries;
+    private final List<Function<LogStoreRecord, Void>> outboxListeners;
 
     private volatile LogStoreRole role;
     private volatile int replicationTerm;
@@ -92,6 +97,8 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
 
         idempotentOps = new ConcurrentHashMap<>();
         indexes = new ConcurrentHashMap<>();
+        outboxEntries = new ConcurrentHashMap<>();
+        outboxListeners = new LinkedList<>();
 
         lastOffset = 0;
         buildIndexes();
@@ -101,26 +108,11 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
 
     @Override
     public void write(String key, String value) throws IOException {
-        if (isFollower()) {
-            if (!partitioned) {
-                leader.write(key, value);
-                return;
-            }
-
-            throw new IllegalStateException("ERR-PART: Unable to write value.");
+        if (forwardToLeader(key, value)) {
+            return;
         }
 
-        int activeReplTerm = ReplicationState.getCurrentTerm();
-
-        if (replicationTerm < activeReplTerm) {
-            System.err
-                    .println(MessageFormat.format("Active replication term, {0}, is ahead of my replication term, {1}.",
-                            activeReplTerm, replicationTerm));
-            System.err.println("Cannot process write request!");
-
-            throw new IllegalStateException();
-        }
-
+        checkFencingTerm();
         writeRecord(key, value);
     }
 
@@ -173,11 +165,6 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
         replicatorService.shutdownNow();
     }
 
-    @Override
-    public Iterator<LogStoreEntrySet> iterator() {
-        return storeReader.iterator();
-    }
-
     public String getPath() {
         return store.getAbsolutePath();
     }
@@ -198,7 +185,45 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
         }
     }
 
-    public void partitionFollower(AppendOnlyLogStore follower) {
+    public void registerOutboxListener(Function<LogStoreRecord, Void> listener) {
+        if (listener == null) {
+            throw new IllegalArgumentException("listener cannot be null.");
+        }
+
+        outboxListeners.add(listener);
+    }
+
+    public void publishOutboxEntries() {
+        outboxEntries
+                .entrySet()
+                .stream()
+                .filter(entry -> !entry.getValue())
+                .forEach(entry -> {
+                    outboxListeners.forEach(listener -> {
+                        String key = entry.getKey();
+                        Long offset = indexes.get(key);
+
+                        if (offset == null) {
+                            // Ignoring for now
+                            return;
+                        }
+
+                        try {
+                            Optional<LogStoreRecord> cdcRecord = storeReader.readCDCRecordForEntryAt(offset);
+
+                            if (cdcRecord.isPresent()) {
+                                listener.apply(cdcRecord.get());
+                                outboxEntries.put(key, true);
+                            }
+                        } catch (IOException e) {
+                            System.err.println("Error while fetching CDC entry for log at offset " + offset + ": "
+                                    + e.getMessage());
+                        }
+                    });
+                });
+    }
+
+    void partitionFollower(AppendOnlyLogStore follower) {
         if (follower == null) {
             throw new IllegalArgumentException("Follower cannot be null.");
         }
@@ -232,6 +257,32 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
         return storeReader.readStoreEntryAt(lastOffset);
     }
 
+    private boolean forwardToLeader(String key, String value) throws IOException {
+        if (!isFollower()) {
+            return false;
+        }
+
+        if (!partitioned) {
+            leader.write(key, value);
+            return true;
+        }
+
+        throw new IllegalStateException("ERR-PART: Unable to write value.");
+    }
+
+    private void checkFencingTerm() {
+        int activeReplTerm = ReplicationState.getCurrentTerm();
+
+        if (replicationTerm < activeReplTerm) {
+            System.err
+                    .println(MessageFormat.format("Active replication term, {0}, is ahead of my replication term, {1}.",
+                            activeReplTerm, replicationTerm));
+            System.err.println("Cannot process write request!");
+
+            throw new IllegalStateException();
+        }
+    }
+
     private void setLeader(AppendOnlyLogStore leader) {
         if (leader == null) {
             throw new IllegalArgumentException("Leader cannot be null.");
@@ -248,16 +299,20 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
         partitioned = !partitioned;
     }
 
-    private void writeRecord(String key, String value) throws IOException {
+    private long writeRecord(String key, String value) throws IOException {
         LogStoreEntrySet storeEntry = storeWriter.insertRecord(key, value);
         LogStoreEntrySet cdcEntry = storeWriter.insertCDCRecord(key, value);
 
         lastOffset = storeEntry.offset();
+
         indexes.put(key, lastOffset);
+        outboxEntries.put(key, false);
 
         if (isLeader()) {
             replicateRecordToFollowers(cdcEntry.entry().record());
         }
+
+        return lastOffset;
     }
 
     private void initStore(String path) throws StoreInitializationException {
@@ -279,15 +334,17 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
     }
 
     private void buildIndexes() {
-        Iterator<LogStoreEntrySet> storeIterator = storeReader.iterator();
-
-        while (storeIterator.hasNext()) {
-            LogStoreEntrySet storeEntry = storeIterator.next();
-
-            if (storeEntry != null) {
-                lastOffset = storeEntry.offset();
-                indexes.put(storeEntry.entry().record().key(), lastOffset);
-            }
+        try {
+            storeReader
+                    .readCompletedLogEntries()
+                    .stream()
+                    .forEach(entrySet -> {
+                        lastOffset = entrySet.offset();
+                        indexes.put(entrySet.entry().record().key(), lastOffset);
+                        outboxEntries.put(entrySet.entry().record().key(), false);
+                    });
+        } catch (IOException e) {
+            System.err.println("Error whilst indexing: " + e.getMessage());
         }
     }
 

@@ -12,4 +12,12 @@ public record LogStoreEntry(byte type, int length, long checksum, LogStoreRecord
         };
     }
 
+    public boolean isLogEntry() {
+        return (type == TYPE_LOG_ENTRY);
+    }
+
+    public boolean isCDCEntry() {
+        return (type == TYPE_CDC_ENTRY);
+    }
+
 }

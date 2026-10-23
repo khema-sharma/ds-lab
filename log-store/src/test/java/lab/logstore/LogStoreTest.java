@@ -8,6 +8,7 @@ import java.io.RandomAccessFile;
 import java.util.UUID;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.junit.jupiter.api.Test;
 
@@ -221,6 +222,25 @@ public class LogStoreTest {
         try (AppendOnlyLogStore store = new AppendOnlyLogStore(storePath)) {
             assertEquals("value-1", store.read("key-1"));
             assertEquals(null, store.read("key-2"));
+        }
+    }
+
+    @Test
+    public void rejectsDuplicateOutboxEvents() throws StoreInitializationException, IOException {
+        try (AppendOnlyLogStore store = new AppendOnlyLogStore()) {
+            AtomicInteger count = new AtomicInteger();
+
+            store.registerOutboxListener(record -> {
+                count.incrementAndGet();
+                return null;
+            });
+
+            insertRecords(store, new String[][] { { "key-1", "value-1" }, { "key-2", "value-2" } });
+
+            store.publishOutboxEntries();
+            store.publishOutboxEntries();
+
+            assertEquals(2, count.get());
         }
     }
 

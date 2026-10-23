@@ -20,6 +20,10 @@ public abstract class RandomLogStoreAccess extends RandomAccessFile {
         return getFilePointer();
     }
 
+    public boolean isEOF() throws IOException {
+        return (pos() == length());
+    }
+
     protected long getChecksum(byte[] contents) {
         crc32Checksum.reset();
         crc32Checksum.update(contents);

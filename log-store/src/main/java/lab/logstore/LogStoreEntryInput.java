@@ -5,6 +5,8 @@ import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.UnsupportedEncodingException;
 import java.nio.ByteBuffer;
+import java.util.LinkedList;
+import java.util.List;
 import java.util.Optional;
 
 public class LogStoreEntryInput extends RandomLogStoreAccess {
@@ -28,7 +30,43 @@ public class LogStoreEntryInput extends RandomLogStoreAccess {
         }
     }
 
-    public Optional<LogStoreEntrySet> getNextEntry() throws IOException {
+    public List<LogStoreEntrySet> getCompletedLogEntries() throws IOException {
+        long lastPos = pos();
+        List<LogStoreEntrySet> allRecordEntries = new LinkedList<>();
+
+        while (!isEOF()) {
+            long previousPos = pos();
+
+            try {
+                Optional<LogStoreEntrySet> recordEntrySet = getNextEntry();
+                
+                if (recordEntrySet.isPresent()) {
+                    if (!recordEntrySet.get().entry().isLogEntry()) {
+                        break;
+                    }
+
+                    Optional<LogStoreEntrySet> cdcEntrySet = getNextEntry();
+
+                    if (cdcEntrySet.isPresent()) {
+                        if (!cdcEntrySet.get().entry().isCDCEntry()) {
+                            break;
+                        }
+
+                        allRecordEntries.add(recordEntrySet.get());
+                    }
+                }
+            } catch (IOException e) {
+                System.err.println("Error reading an entry at offset: " + previousPos);
+                break;
+            }
+        }
+
+        seek(lastPos);
+
+        return allRecordEntries;
+    }
+
+    Optional<LogStoreEntrySet> getNextEntry() throws IOException {
         long entryOffset = pos();
 
         synchronized (readMonitor) {
