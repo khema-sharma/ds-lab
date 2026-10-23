@@ -4,10 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import java.io.IOException;
-import java.net.URI;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
+import java.io.RandomAccessFile;
 import java.util.UUID;
 
 import org.junit.jupiter.api.Test;
@@ -185,12 +182,12 @@ public class LogStoreTest {
     @Test
     public void rejectsRecordWithoutCDCWrite() throws StoreInitializationException, IOException {
         String storePath = null;
-        
+
         try (AppendOnlyLogStore store = new AppendOnlyLogStore()) {
             storePath = store.getPath();
-            
+
             insertRecords(store, new String[][] { { "key-1", "value-1" }, { "key-2", "value-2" } });
-            
+
             assertEquals("value-1", store.read("key-1"));
 
             tearTailCDCEntry(store);
@@ -203,27 +200,25 @@ public class LogStoreTest {
     }
 
     private void tearTailRecord(AppendOnlyLogStore store) throws IOException {
-        LogStoreEntry lastEntry = store.getLastEntry().get();
-        int endOffset = (int) lastEntry.offset() + (lastEntry.toString().length() - (lastEntry.length()/2));
+        LogStoreEntrySet lastEntry = store.getLastEntry().get();
+        int endOffset = (int) (lastEntry.offset() + (lastEntry.length() / 2));
 
-        Path storePathObject = Path.of(URI.create("file:///" + store.getPath()));
+        RandomAccessFile storeFile = new RandomAccessFile(store.getFile(), "rw");
 
-        String contents = Files.readString(storePathObject, StandardCharsets.UTF_8);
-        String tornContents = contents.substring(0, endOffset);
-        
-        Files.writeString(storePathObject, tornContents, StandardCharsets.UTF_8);
+        storeFile.setLength(endOffset);
+        storeFile.close();
     }
 
     private void tearTailCDCEntry(AppendOnlyLogStore store) throws IOException {
-        LogStoreEntry lastEntry = store.getLastEntry().get();
-        int endOffset = (int) (lastEntry.offset() + lastEntry.toString().length()) + 1;
-
-        Path storePathObject = Path.of(URI.create("file:///" + store.getPath()));
-
-        String contents = Files.readString(storePathObject, StandardCharsets.UTF_8);
-        String tornContents = contents.substring(0, endOffset);
+        LogStoreEntrySet lastEntry = store.getLastEntry().get();
         
-        Files.writeString(storePathObject, tornContents, StandardCharsets.UTF_8);
+        int entryEndOffset = (int) (lastEntry.offset() + lastEntry.length()) + LogStoreEntry.LOG_ENTRY_SEP.length();
+        int cdcStartOffset = entryEndOffset;
+
+        RandomAccessFile storeFile = new RandomAccessFile(store.getFile(), "rw");
+
+        storeFile.setLength(cdcStartOffset + LogStoreEntryOuput.RECORD_OFFSET + 1);
+        storeFile.close();
     }
 
     private void insertRecords(AppendOnlyLogStore store, String[][] records)

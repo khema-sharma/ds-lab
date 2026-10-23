@@ -35,7 +35,7 @@ import java.util.concurrent.Executors;
  * {@code key} from the store
  * </ul>
  */
-public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogStoreEntry>, Closeable {
+public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogStoreEntrySet>, Closeable {
 
     private static final String ERR_IN_INIT = "An error occurred while initializing store: {0}";
 
@@ -55,6 +55,8 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
     private final ExecutorService replicatorService;
 
     private final Map<IdempotencyKey, Long> idempotentOps;
+
+    static final int EOF = -1;
 
     public AppendOnlyLogStore() throws StoreInitializationException {
         this((String) null);
@@ -158,12 +160,16 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
     }
 
     @Override
-    public Iterator<LogStoreEntry> iterator() {
+    public Iterator<LogStoreEntrySet> iterator() {
         return storeReader.iterator();
     }
 
     public String getPath() {
         return store.getAbsolutePath();
+    }
+
+    public File getFile() {
+        return new File(store.getPath());
     }
 
     public void becomeLeader() {
@@ -204,11 +210,13 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
         follower.togglePartitioned();
     }
 
-    Optional<LogStoreEntry> getLastEntry() throws IOException {
+    Optional<LogStoreEntrySet> getLastEntry() throws IOException {
         Long[] offsets = indexes.values().toArray(new Long[0]);
         Arrays.sort(offsets);
-        
-        return storeReader.readStoreEntryAt(offsets[offsets.length - 1]);
+
+        long offset = offsets[offsets.length - 1];
+
+        return storeReader.readStoreEntryAt(offset);
     }
 
     private void setLeader(AppendOnlyLogStore leader) {
@@ -228,13 +236,13 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
     }
 
     private void writeRecord(String key, String value) throws IOException {
-        LogStoreEntry storeEntry = storeWriter.insertRecord(key, value);
-        LogStoreEntry cdcEntry = storeWriter.insertCDCRecord(key, value);
+        LogStoreEntrySet storeEntry = storeWriter.insertRecord(key, value);
+        LogStoreEntrySet cdcEntry = storeWriter.insertCDCRecord(key, value);
 
         indexes.put(key, storeEntry.offset());
 
         if (isLeader()) {
-            replicateRecordToFollowers(cdcEntry.record());
+            replicateRecordToFollowers(cdcEntry.entry().record());
         }
     }
 
@@ -255,13 +263,13 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
     }
 
     private void buildIndexes() {
-        Iterator<LogStoreEntry> storeIterator = storeReader.iterator();
+        Iterator<LogStoreEntrySet> storeIterator = storeReader.iterator();
 
         while (storeIterator.hasNext()) {
-            LogStoreEntry storeEntry = storeIterator.next();
+            LogStoreEntrySet storeEntry = storeIterator.next();
 
             if (storeEntry != null) {
-                indexes.put(storeEntry.record().key(), storeEntry.offset());
+                indexes.put(storeEntry.entry().record().key(), storeEntry.offset());
             }
         }
     }
