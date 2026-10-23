@@ -119,7 +119,7 @@ public class LogStoreTest {
 
                     followerA.write("key-2", "value-2");
 
-                    leader.internalWaitTillReplicationsComplete();
+                    followerA.internalWaitTillReplicationsComplete();
 
                     assertEquals("value-2", followerB.read("key-2"));
 

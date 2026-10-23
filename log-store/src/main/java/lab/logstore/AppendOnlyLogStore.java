@@ -6,7 +6,6 @@ import java.io.IOException;
 import java.text.MessageFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Collections;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -68,7 +67,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
 
     private final Map<IdempotencyKey, LogRecordOffet> idempotentOps;
 
-    private final Object roleMonitor;
+    private final Object leaderReplicationMonitor;
 
     public AppendOnlyLogStore() throws StoreInitializationException {
         this((String) null);
@@ -91,13 +90,13 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
                     MessageFormat.format(ERR_IN_INIT, e.getMessage()), e);
         }
 
-        roleMonitor = new Object();
+        leaderReplicationMonitor = new Object();
 
         seteRole(storeRole);
 
         followerStatusMap = new LinkedHashMap<>();
         replicatorService = Executors.newFixedThreadPool(5);
-        replicationCallFutures = Collections.emptyList();
+        replicationCallFutures = new ArrayList<>();
 
         idempotentOps = new ConcurrentHashMap<>();
 
@@ -232,19 +231,31 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
         follower.togglePartitioned();
     }
 
-    void internalWaitTillReplicationsComplete() throws InterruptedException, ExecutionException, TimeoutException {
-        if (replicationCallFutures.isEmpty()) {
-            return;
-        }
+    void internalWaitTillReplicationsComplete() throws InterruptedException {
+        Thread waitThread = new Thread() {
+            public void run() {
+                synchronized (leaderReplicationMonitor) {
+                    if (replicationCallFutures.isEmpty()) {
+                        return;
+                    }
 
-        for (Future<Boolean> replFuture : replicationCallFutures) {
-            if (!replFuture.isDone()) {
-                System.out.println("Waiting for replication to complete.");
-                replFuture.get(200, TimeUnit.MILLISECONDS);
+                    for (Future<Boolean> replFuture : replicationCallFutures) {
+                        try {
+                            if (!replFuture.isDone()) {
+                                replFuture.get();
+                            }
+                        } catch (InterruptedException | ExecutionException e) {
+                            e.printStackTrace();
+                        }
+                    }
+
+                    replicationCallFutures.clear();
+                }
             }
-        }
+        };
 
-        replicationCallFutures.clear();
+        waitThread.run();
+        waitThread.join(3000);
     }
 
     Optional<LogStoreEntrySet> getLastEntry() throws IOException {
@@ -278,7 +289,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
 
         indexes.put(key, storeEntry.offset());
 
-        synchronized (roleMonitor) {
+        synchronized (leaderReplicationMonitor) {
             if (isLeader()) {
                 replicateRecordToFollowers(cdcEntry.entry().record());
             }
@@ -297,7 +308,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
     }
 
     private void seteRole(LogStoreRole storeRole) {
-        synchronized (roleMonitor) {
+        synchronized (leaderReplicationMonitor) {
             role = (storeRole == null ? LogStoreRole.FOLLOWER : storeRole);
             replicationTerm = (role == LogStoreRole.LEADER ? ReplicationState.getNextTerm() : 0);
         }
@@ -338,11 +349,9 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
                 })
                 .collect(Collectors.toList());
 
-        try {
-            replicationCallFutures = replicatorService.invokeAll(replicationCallables);
-        } catch (InterruptedException e) {
-            e.printStackTrace();
-        }
+        replicationCallables.forEach(callable -> {
+            replicationCallFutures.add(replicatorService.submit(callable));
+        });
     }
 
     private boolean isLeader() {
