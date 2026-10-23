@@ -5,7 +5,6 @@ import java.io.File;
 import java.io.IOException;
 import java.text.MessageFormat;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -18,8 +17,6 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 import java.util.stream.Collectors;
 
 /**
@@ -53,6 +50,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
     private AppendOnlyLogStoreReader storeReader;
 
     private final Map<String, Long> indexes;
+    private long lastOffset;
 
     private volatile LogStoreRole role;
     private volatile int replicationTerm;
@@ -65,7 +63,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
     private final Map<AppendOnlyLogStore, Boolean> followerStatusMap;
     private final ExecutorService replicatorService;
 
-    private final Map<IdempotencyKey, LogRecordOffet> idempotentOps;
+    private final Map<IdempotencyKey, LogRecordOffset> idempotentOps;
 
     private final Object leaderReplicationMonitor;
 
@@ -99,8 +97,9 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
         replicationCallFutures = new ArrayList<>();
 
         idempotentOps = new ConcurrentHashMap<>();
-
         indexes = new ConcurrentHashMap<>();
+
+        lastOffset = 0;
         buildIndexes();
 
         System.out.println("Created store at: " + store.getAbsolutePath());
@@ -133,10 +132,10 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
 
     public long write(IdempotencyKey idempotencyKey, String key, String value) throws IOException {
         if (idempotentOps.containsKey(idempotencyKey)) {
-            LogRecordOffet recordOffset = idempotentOps.get(idempotencyKey);
+            LogRecordOffset recordOffset = idempotentOps.get(idempotencyKey);
 
             if (recordOffset.record().key().equals(key) && recordOffset.record().value().equals(value)) {
-                return ((LogRecordOffet) idempotentOps.get(idempotencyKey)).offset();
+                return ((LogRecordOffset) idempotentOps.get(idempotencyKey)).offset();
             }
 
             throw new IllegalStateException("Given idempotency key is mapped to a different payload.");
@@ -146,7 +145,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
 
         long writeOffset = indexes.get(key);
 
-        idempotentOps.put(idempotencyKey, new LogRecordOffet(writeOffset, new LogStoreRecord(key, value)));
+        idempotentOps.put(idempotencyKey, new LogRecordOffset(writeOffset, new LogStoreRecord(key, value)));
 
         return writeOffset;
     }
@@ -255,16 +254,11 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
         };
 
         waitThread.run();
-        waitThread.join(3000);
+        waitThread.join(5000);
     }
 
     Optional<LogStoreEntrySet> getLastEntry() throws IOException {
-        Long[] offsets = indexes.values().toArray(new Long[0]);
-        Arrays.sort(offsets);
-
-        long offset = offsets[offsets.length - 1];
-
-        return storeReader.readStoreEntryAt(offset);
+        return storeReader.readStoreEntryAt(lastOffset);
     }
 
     private void setLeader(AppendOnlyLogStore leader) {
@@ -287,7 +281,8 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
         LogStoreEntrySet storeEntry = storeWriter.insertRecord(key, value);
         LogStoreEntrySet cdcEntry = storeWriter.insertCDCRecord(key, value);
 
-        indexes.put(key, storeEntry.offset());
+        lastOffset = storeEntry.offset();
+        indexes.put(key, lastOffset);
 
         synchronized (leaderReplicationMonitor) {
             if (isLeader()) {
@@ -321,7 +316,8 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
             LogStoreEntrySet storeEntry = storeIterator.next();
 
             if (storeEntry != null) {
-                indexes.put(storeEntry.entry().record().key(), storeEntry.offset());
+                lastOffset = storeEntry.offset();
+                indexes.put(storeEntry.entry().record().key(), lastOffset);
             }
         }
     }
@@ -362,7 +358,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
         return LogStoreRole.FOLLOWER.equals(role);
     }
 
-    private record LogRecordOffet(long offset, LogStoreRecord record) {
+    private record LogRecordOffset(long offset, LogStoreRecord record) {
     }
 
     public static void main(String[] args) {
