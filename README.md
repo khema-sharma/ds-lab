@@ -41,6 +41,7 @@ The store handles following failure modes:
   - Partitioned follower rejects write
 - It rejects duplicate write with same idempotency key
 - It rejects write without a corresponding Outbox entry
+- It rejects a duplicate outbox publish event
 
 ## Measurements
 
