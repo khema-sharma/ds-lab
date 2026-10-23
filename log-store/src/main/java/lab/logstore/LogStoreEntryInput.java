@@ -9,8 +9,12 @@ import java.util.Optional;
 
 public class LogStoreEntryInput extends RandomLogStoreAccess {
 
+    private final Object readMonitor;
+
     public LogStoreEntryInput(File file) throws FileNotFoundException {
         super(file, "r");
+
+        readMonitor = new Object();
     }
 
     public Optional<LogStoreEntrySet> getEntryAt(long offset) throws IOException {
@@ -18,45 +22,48 @@ public class LogStoreEntryInput extends RandomLogStoreAccess {
             throw new IllegalArgumentException("offset must be between 0 and length of the store.");
         }
 
-        seek(offset);
-
-        return getNextEntry();
+        synchronized (readMonitor) {
+            seek(offset);
+            return getNextEntry();
+        }
     }
 
     public Optional<LogStoreEntrySet> getNextEntry() throws IOException {
         long entryOffset = pos();
 
-        try {
+        synchronized (readMonitor) {
+            try {
 
-            byte type = (byte) readByte();
+                byte type = (byte) readByte();
 
-            if (!LogStoreEntry.isValidEntryType(type)) {
-                throw new IllegalStateException("Invalid entry type.");
+                if (!LogStoreEntry.isValidEntryType(type)) {
+                    throw new IllegalStateException("Invalid entry type.");
+                }
+
+                int length = readInt();
+                long expectedChecksum = readLong();
+                byte[] recordBytes = new byte[length];
+
+                readFully(recordBytes);
+
+                long actualChecksum = getChecksum(recordBytes);
+                if (expectedChecksum != actualChecksum) {
+                    throw new IllegalStateException("Invalid record, checksum mismatch.");
+                }
+
+                Optional<LogStoreRecord> record = readLogStoreRecord(recordBytes);
+                if (record.isEmpty()) {
+                    throw new IllegalStateException("Could not parse record from the stream.");
+                }
+
+                long entryLength = (pos() - entryOffset);
+
+                return Optional.of(new LogStoreEntrySet(entryOffset, entryLength,
+                        new LogStoreEntry(type, length, actualChecksum, record.get())));
+
+            } catch (IllegalStateException ise) {
+                return Optional.empty();
             }
-
-            int length = readInt();
-            long expectedChecksum = readLong();
-            byte[] recordBytes = new byte[length];
-
-            readFully(recordBytes);
-
-            long actualChecksum = getChecksum(recordBytes);
-            if (expectedChecksum != actualChecksum) {
-                throw new IllegalStateException("Invalid record, checksum mismatch.");
-            }
-
-            Optional<LogStoreRecord> record = readLogStoreRecord(recordBytes);
-            if (record.isEmpty()) {
-                throw new IllegalStateException("Could not parse record from the stream.");
-            }
-
-            long entryLength = (pos() - entryOffset);
-
-            return Optional.of(new LogStoreEntrySet(entryOffset, entryLength,
-                    new LogStoreEntry(type, length, actualChecksum, record.get())));
-
-        } catch (IllegalStateException ise) {
-            return Optional.empty();
         }
     }
 

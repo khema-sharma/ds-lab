@@ -9,8 +9,6 @@ public final class LogStoreEntryOuput extends RandomLogStoreAccess {
 
     public static final int RECORD_OFFSET = (Byte.BYTES + Integer.BYTES + Long.BYTES);
 
-    
-
     public LogStoreEntryOuput(File file) throws FileNotFoundException {
         super(file, "rwd");
     }

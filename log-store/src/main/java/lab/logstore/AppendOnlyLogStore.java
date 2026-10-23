@@ -4,15 +4,24 @@ import java.io.Closeable;
 import java.io.File;
 import java.io.IOException;
 import java.text.MessageFormat;
+import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.HashMap;
+import java.util.Collections;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Optional;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.stream.Collectors;
 
 /**
  * AppendOnlyLogStore is a simple {@code(key, value)} store backed up by a
@@ -48,15 +57,18 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
 
     private volatile LogStoreRole role;
     private volatile int replicationTerm;
+    private volatile List<Future<Boolean>> replicationCallFutures;
+
     private volatile boolean partitioned;
+
     private volatile AppendOnlyLogStore leader;
 
     private final Map<AppendOnlyLogStore, Boolean> followerStatusMap;
     private final ExecutorService replicatorService;
 
-    private final Map<IdempotencyKey, Long> idempotentOps;
+    private final Map<IdempotencyKey, LogRecordOffet> idempotentOps;
 
-    static final int EOF = -1;
+    private final Object roleMonitor;
 
     public AppendOnlyLogStore() throws StoreInitializationException {
         this((String) null);
@@ -79,14 +91,17 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
                     MessageFormat.format(ERR_IN_INIT, e.getMessage()), e);
         }
 
+        roleMonitor = new Object();
+
         seteRole(storeRole);
 
         followerStatusMap = new LinkedHashMap<>();
         replicatorService = Executors.newFixedThreadPool(5);
+        replicationCallFutures = Collections.emptyList();
 
-        idempotentOps = new HashMap<>();
+        idempotentOps = new ConcurrentHashMap<>();
 
-        indexes = new LinkedHashMap<>();
+        indexes = new ConcurrentHashMap<>();
         buildIndexes();
 
         System.out.println("Created store at: " + store.getAbsolutePath());
@@ -119,13 +134,20 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
 
     public long write(IdempotencyKey idempotencyKey, String key, String value) throws IOException {
         if (idempotentOps.containsKey(idempotencyKey)) {
-            return idempotentOps.get(idempotencyKey);
+            LogRecordOffet recordOffset = idempotentOps.get(idempotencyKey);
+
+            if (recordOffset.record().key().equals(key) && recordOffset.record().value().equals(value)) {
+                return ((LogRecordOffet) idempotentOps.get(idempotencyKey)).offset();
+            }
+
+            throw new IllegalStateException("Given idempotency key is mapped to a different payload.");
         }
 
         write(key, value);
 
         long writeOffset = indexes.get(key);
-        idempotentOps.put(idempotencyKey, writeOffset);
+
+        idempotentOps.put(idempotencyKey, new LogRecordOffet(writeOffset, new LogStoreRecord(key, value)));
 
         return writeOffset;
     }
@@ -210,6 +232,21 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
         follower.togglePartitioned();
     }
 
+    void internalWaitTillReplicationsComplete() throws InterruptedException, ExecutionException, TimeoutException {
+        if (replicationCallFutures.isEmpty()) {
+            return;
+        }
+
+        for (Future<Boolean> replFuture : replicationCallFutures) {
+            if (!replFuture.isDone()) {
+                System.out.println("Waiting for replication to complete.");
+                replFuture.get(200, TimeUnit.MILLISECONDS);
+            }
+        }
+
+        replicationCallFutures.clear();
+    }
+
     Optional<LogStoreEntrySet> getLastEntry() throws IOException {
         Long[] offsets = indexes.values().toArray(new Long[0]);
         Arrays.sort(offsets);
@@ -241,8 +278,10 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
 
         indexes.put(key, storeEntry.offset());
 
-        if (isLeader()) {
-            replicateRecordToFollowers(cdcEntry.entry().record());
+        synchronized (roleMonitor) {
+            if (isLeader()) {
+                replicateRecordToFollowers(cdcEntry.entry().record());
+            }
         }
     }
 
@@ -258,8 +297,10 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
     }
 
     private void seteRole(LogStoreRole storeRole) {
-        role = (storeRole == null ? LogStoreRole.FOLLOWER : storeRole);
-        replicationTerm = (role == LogStoreRole.LEADER ? ReplicationState.getNextTerm() : 0);
+        synchronized (roleMonitor) {
+            role = (storeRole == null ? LogStoreRole.FOLLOWER : storeRole);
+            replicationTerm = (role == LogStoreRole.LEADER ? ReplicationState.getNextTerm() : 0);
+        }
     }
 
     private void buildIndexes() {
@@ -279,19 +320,29 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
             throw new IllegalStateException();
         }
 
-        replicatorService.submit(() -> {
-            followerStatusMap.entrySet().parallelStream().forEach((Entry<AppendOnlyLogStore, Boolean> followerSet) -> {
-                if (!followerSet.getValue()) {
-                    return;
-                }
+        List<Callable<Boolean>> replicationCallables = followerStatusMap
+                .entrySet()
+                .parallelStream()
+                .map((Entry<AppendOnlyLogStore, Boolean> followerSet) -> {
+                    return new Callable<Boolean>() {
+                        @Override
+                        public Boolean call() throws Exception {
+                            if (!followerSet.getValue()) {
+                                return true;
+                            }
 
-                try {
-                    followerSet.getKey().replicateRecord(replicationTerm, record);
-                } catch (IOException e) {
-                    e.printStackTrace();
-                }
-            });
-        });
+                            followerSet.getKey().replicateRecord(replicationTerm, record);
+                            return true;
+                        }
+                    };
+                })
+                .collect(Collectors.toList());
+
+        try {
+            replicationCallFutures = replicatorService.invokeAll(replicationCallables);
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        }
     }
 
     private boolean isLeader() {
@@ -300,6 +351,9 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
 
     private boolean isFollower() {
         return LogStoreRole.FOLLOWER.equals(role);
+    }
+
+    private record LogRecordOffet(long offset, LogStoreRecord record) {
     }
 
     public static void main(String[] args) {

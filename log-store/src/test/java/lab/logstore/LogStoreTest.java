@@ -6,6 +6,8 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import java.io.IOException;
 import java.io.RandomAccessFile;
 import java.util.UUID;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeoutException;
 
 import org.junit.jupiter.api.Test;
 
@@ -79,21 +81,26 @@ public class LogStoreTest {
     }
 
     @Test
-    public void acceptsReplicatedWrite() throws StoreInitializationException, IOException, InterruptedException {
+    public void acceptsReplicatedWrite() throws StoreInitializationException, IOException, InterruptedException,
+            ExecutionException, TimeoutException {
+
         try (AppendOnlyLogStore leader = new AppendOnlyLogStore()) {
             try (AppendOnlyLogStore follower = new AppendOnlyLogStore(LogStoreRole.FOLLOWER)) {
                 leader.registerFollower(follower);
                 leader.write("key-1", "value-1");
+                leader.internalWaitTillReplicationsComplete();
 
-                Thread.sleep(1000);
                 assertEquals("value-1", follower.read("key-1"));
             }
         }
+
     }
 
     @Test
     public void rejectsWriteFromFailOver()
-            throws StoreInitializationException, IOException, InterruptedException {
+            throws StoreInitializationException, IOException, InterruptedException, ExecutionException,
+            TimeoutException {
+
         try (AppendOnlyLogStore leader = new AppendOnlyLogStore()) {
             try (AppendOnlyLogStore followerA = new AppendOnlyLogStore(LogStoreRole.FOLLOWER)) {
                 try (AppendOnlyLogStore followerB = new AppendOnlyLogStore(LogStoreRole.FOLLOWER)) {
@@ -102,7 +109,7 @@ public class LogStoreTest {
 
                     leader.write("key-1", "value-1");
 
-                    Thread.sleep(200);
+                    leader.internalWaitTillReplicationsComplete();
 
                     assertEquals("value-1", followerA.read("key-1"));
                     assertEquals("value-1", followerB.read("key-1"));
@@ -112,7 +119,7 @@ public class LogStoreTest {
 
                     followerA.write("key-2", "value-2");
 
-                    Thread.sleep(200);
+                    leader.internalWaitTillReplicationsComplete();
 
                     assertEquals("value-2", followerB.read("key-2"));
 
@@ -121,10 +128,13 @@ public class LogStoreTest {
                 }
             }
         }
+
     }
 
     @Test
-    public void rejectsPartitionedFollower() throws StoreInitializationException, IOException, InterruptedException {
+    public void rejectsPartitionedFollower() throws StoreInitializationException, IOException, InterruptedException,
+            ExecutionException, TimeoutException {
+
         try (AppendOnlyLogStore leader = new AppendOnlyLogStore()) {
             try (AppendOnlyLogStore followerA = new AppendOnlyLogStore(LogStoreRole.FOLLOWER)) {
                 try (AppendOnlyLogStore followerB = new AppendOnlyLogStore(LogStoreRole.FOLLOWER)) {
@@ -133,14 +143,14 @@ public class LogStoreTest {
 
                     leader.write("key-1", "value-1");
 
-                    Thread.sleep(200);
+                    leader.internalWaitTillReplicationsComplete();
 
                     assertEquals("value-1", followerA.read("key-1"));
                     assertEquals("value-1", followerB.read("key-1"));
 
                     followerA.write("key-2", "value-2");
 
-                    Thread.sleep(200);
+                    leader.internalWaitTillReplicationsComplete();
 
                     assertEquals("value-2", leader.read("key-2"));
                     assertEquals("value-2", followerA.read("key-2"));
@@ -151,7 +161,7 @@ public class LogStoreTest {
                     leader.write("key-3", "value-3");
                     leader.write("key-1", "value-1.1");
 
-                    Thread.sleep(800);
+                    leader.internalWaitTillReplicationsComplete();
 
                     assertEquals(null, followerA.read("key-3"));
                     assertEquals("value-3", followerB.read("key-3"));
@@ -164,18 +174,33 @@ public class LogStoreTest {
                 }
             }
         }
+
     }
 
     @Test
-    public void rejectsDuplicateWrite() throws StoreInitializationException, IOException {
+    public void ignoresIdempotentWrite() throws StoreInitializationException, IOException {
         try (AppendOnlyLogStore store = new AppendOnlyLogStore()) {
             IdempotencyKey idempotencyKey = new IdempotencyKey(UUID.randomUUID().toString());
 
             long offset = store.write(idempotencyKey, "key-1", "value-1");
-            long nxtOffset = store.write(idempotencyKey, "key-2", "value-2");
+            long nxtOffset = store.write(idempotencyKey, "key-1", "value-1");
 
             assertEquals("value-1", store.read("key-1"));
             assertEquals(offset, nxtOffset);
+        }
+    }
+
+    @Test
+    public void rejectsInvalidIdempotentWrite() throws StoreInitializationException, IOException {
+        try (AppendOnlyLogStore store = new AppendOnlyLogStore()) {
+            IdempotencyKey idempotencyKey = new IdempotencyKey(UUID.randomUUID().toString());
+
+            store.write(idempotencyKey, "key-1", "value-1");
+
+            assertEquals("value-1", store.read("key-1"));
+            assertThrows(IllegalStateException.class, () -> {
+                store.write(idempotencyKey, "key-1", "value-2");
+            });
         }
     }
 
@@ -211,7 +236,7 @@ public class LogStoreTest {
 
     private void tearTailCDCEntry(AppendOnlyLogStore store) throws IOException {
         LogStoreEntrySet lastEntry = store.getLastEntry().get();
-        
+
         int entryEndOffset = (int) (lastEntry.offset() + lastEntry.length());
         int cdcStartOffset = entryEndOffset;
 

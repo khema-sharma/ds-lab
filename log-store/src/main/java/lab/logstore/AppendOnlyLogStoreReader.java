@@ -8,7 +8,7 @@ import java.util.Iterator;
 import java.util.Optional;
 
 public class AppendOnlyLogStoreReader implements Closeable {
-    final File logStore;
+    private final File logStore;
     private final LogStoreEntryInput storeInput;
 
     public AppendOnlyLogStoreReader(File store) throws StoreInitializationException {
