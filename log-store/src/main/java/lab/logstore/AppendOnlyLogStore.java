@@ -301,14 +301,17 @@ public class AppendOnlyLogStore extends AbstractStore implements Iterable<LogSto
 
             followerStatusMap.forEach((store, status) -> {
                 replicatorService.submit(() -> {
-                    if (!status) {
+                    try {
+                        if (!status) {
+                            return true;
+                        }
+
+                        store.replicateRecord(replicationTerm, record);
+
                         return true;
+                    } finally {
+                        replicationCallsWaitLatch.get().countDown();
                     }
-
-                    store.replicateRecord(replicationTerm, record);
-                    replicationCallsWaitLatch.get().countDown();
-
-                    return true;
                 });
             });
         }
