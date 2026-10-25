@@ -1,6 +1,6 @@
 package lab.logstore;
 
-public record LogStoreEntry(byte type, int length, long checksum, LogStoreRecord record) {
+public record LogStoreEntry<T extends LogStoreEntryPayload>(byte type, int length, long checksum, T record) {
 
     public static final byte TYPE_LOG_ENTRY = 1;
     public static final byte TYPE_CDC_ENTRY = 2;

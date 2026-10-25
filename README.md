@@ -42,6 +42,7 @@ The store handles following failure modes:
 - It rejects duplicate write with same idempotency key
 - It rejects write without a corresponding Outbox entry
 - It rejects a duplicate outbox publish event
+- It rejects a duplicate outbox publish event after store reopen
 
 ## Measurements
 

@@ -13,20 +13,8 @@ public final class LogStoreEntryOuput extends RandomLogStoreAccess {
         super(file, "rwd");
     }
 
-    public LogStoreEntry putEntry(byte type, String key, String value) throws IOException {
-        LogStoreRecord record = new LogStoreRecord(key, value);
-
-        byte[] keyBytes = key.getBytes();
-        byte[] valueBytes = value.getBytes();
-
-        byte[] data = ByteBuffer
-            .allocate(Integer.BYTES + keyBytes.length + Integer.BYTES + valueBytes.length)
-            .putInt(keyBytes.length)
-            .put(keyBytes)
-            .putInt(valueBytes.length)
-            .put(valueBytes)
-            .array();
-
+    public LogStoreEntry<LogStoreEntryPayload> putEntry(byte type, LogStoreEntryPayload payload) throws IOException {
+        byte[] data = payload.getPayload();
         long checksum = getChecksum(data);
 
         write(ByteBuffer
@@ -36,8 +24,8 @@ public final class LogStoreEntryOuput extends RandomLogStoreAccess {
                 .putLong(checksum)
                 .put(data)
                 .array());
-
-        return new LogStoreEntry(type, data.length, checksum, record);
+        
+        return new LogStoreEntry<LogStoreEntryPayload>(type, data.length, checksum, payload);
     }
 
 }

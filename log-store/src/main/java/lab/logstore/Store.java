@@ -2,6 +2,9 @@ package lab.logstore;
 
 import java.io.IOException;
 
+/**
+ * A key-value (KV) store.
+ */
 public interface Store {
     /**
      * Saves given value in the store and associates the given key to it for later

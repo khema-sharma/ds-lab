@@ -245,8 +245,42 @@ public class LogStoreTest {
         }
     }
 
+    @Test
+    public void rejectsDuplicateOutboxEventsOnReopen() throws StoreInitializationException, IOException {
+        String storePath = null;
+
+        try (AppendOnlyLogStore store = new AppendOnlyLogStore()) {
+            storePath = store.getPath();
+
+            AtomicInteger count = new AtomicInteger();
+
+            store.registerOutboxListener(record -> {
+                count.incrementAndGet();
+                return null;
+            });
+
+            insertRecords(store, new String[][] { { "key-1", "value-1" }, { "key-2", "value-2" } });
+            store.publishOutboxEntries();
+
+            assertEquals(2, count.get());
+        }
+
+        try (AppendOnlyLogStore store = new AppendOnlyLogStore(storePath)) {
+             AtomicInteger count = new AtomicInteger();
+
+            store.registerOutboxListener(record -> {
+                count.incrementAndGet();
+                return null;
+            });
+
+            store.publishOutboxEntries();
+
+            assertEquals(0, count.get());           
+        }
+    }
+
     private void tearTailRecord(AppendOnlyLogStore store) throws IOException {
-        LogStoreEntrySet lastEntry = store.getLastEntry().get();
+        LogStoreEntrySet<LogStoreRecord> lastEntry = store.getLastEntry().get();
         int endOffset = (int) (lastEntry.offset() + (lastEntry.length() / 2));
 
         RandomAccessFile storeFile = new RandomAccessFile(store.getFile(), "rw");
@@ -256,7 +290,7 @@ public class LogStoreTest {
     }
 
     private void tearTailCDCEntry(AppendOnlyLogStore store) throws IOException {
-        LogStoreEntrySet lastEntry = store.getLastEntry().get();
+        LogStoreEntrySet<LogStoreRecord> lastEntry = store.getLastEntry().get();
 
         int entryEndOffset = (int) (lastEntry.offset() + lastEntry.length());
         int cdcStartOffset = entryEndOffset;

@@ -1,9 +1,24 @@
 package lab.logstore;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
 import java.io.File;
+import java.io.FileNotFoundException;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.ObjectInputStream;
+import java.io.OutputStream;
+import java.io.RandomAccessFile;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
+import java.nio.file.StandardOpenOption;
 import java.text.MessageFormat;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedList;
 import java.util.List;
@@ -13,6 +28,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
@@ -44,14 +60,13 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
 
     private File store;
 
-    private AppendOnlyLogStoreWriter storeWriter;
-    private AppendOnlyLogStoreReader storeReader;
+    private StoreWriter storeWriter;
+    private StoreReader storeReader;
+
+    private OutboxStore outboxStore;
 
     private final Map<String, Long> indexes;
     private long lastOffset;
-
-    private final Map<String, Boolean> outboxEntries;
-    private final List<Function<LogStoreRecord, Void>> outboxListeners;
 
     private volatile LogStoreRole role;
     private volatile int replicationTerm;
@@ -97,8 +112,6 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
 
         idempotentOps = new ConcurrentHashMap<>();
         indexes = new ConcurrentHashMap<>();
-        outboxEntries = new ConcurrentHashMap<>();
-        outboxListeners = new LinkedList<>();
 
         lastOffset = 0;
         buildIndexes();
@@ -185,42 +198,12 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
         }
     }
 
-    public void registerOutboxListener(Function<LogStoreRecord, Void> listener) {
-        if (listener == null) {
-            throw new IllegalArgumentException("listener cannot be null.");
-        }
-
-        outboxListeners.add(listener);
+    public void registerOutboxListener(Function<LogStoreEvent, Void> listener) {
+        outboxStore.registerListener(listener);
     }
 
     public void publishOutboxEntries() {
-        outboxEntries
-                .entrySet()
-                .stream()
-                .filter(entry -> !entry.getValue())
-                .forEach(entry -> {
-                    outboxListeners.forEach(listener -> {
-                        String key = entry.getKey();
-                        Long offset = indexes.get(key);
-
-                        if (offset == null) {
-                            // Ignoring for now
-                            return;
-                        }
-
-                        try {
-                            Optional<LogStoreRecord> cdcRecord = storeReader.readCDCRecordForEntryAt(offset);
-
-                            if (cdcRecord.isPresent()) {
-                                listener.apply(cdcRecord.get());
-                                outboxEntries.put(key, true);
-                            }
-                        } catch (IOException e) {
-                            System.err.println("Error while fetching CDC entry for log at offset " + offset + ": "
-                                    + e.getMessage());
-                        }
-                    });
-                });
+        outboxStore.publishEvents();
     }
 
     void partitionFollower(AppendOnlyLogStore follower) {
@@ -253,7 +236,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
         replicationCallsWaitLatch.get().await(5, TimeUnit.SECONDS);
     }
 
-    Optional<LogStoreEntrySet> getLastEntry() throws IOException {
+    Optional<LogStoreEntrySet<LogStoreRecord>> getLastEntry() throws IOException {
         return storeReader.readStoreEntryAt(lastOffset);
     }
 
@@ -300,16 +283,20 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
     }
 
     private long writeRecord(String key, String value) throws IOException {
-        LogStoreEntrySet storeEntry = storeWriter.insertRecord(key, value);
-        LogStoreEntrySet cdcEntry = storeWriter.insertCDCRecord(key, value);
+        long timestamp = System.currentTimeMillis();
+
+        LogStoreEntrySet<LogStoreRecord> storeEntry = storeWriter.insertRecord(key, value);
+        LogStoreEntrySet<LogStoreCDCRecord> cdcEntry = storeWriter.insertCDCRecord(LogStoreCDCRecord.TYPE_INSERT,
+                timestamp, new LogStoreInsertEvent(key, value));
 
         lastOffset = storeEntry.offset();
 
         indexes.put(key, lastOffset);
-        outboxEntries.put(key, false);
+
+        outboxStore.recordInserted(cdcEntry);
 
         if (isLeader()) {
-            replicateRecordToFollowers(cdcEntry.entry().record());
+            replicateRecordToFollowers(storeEntry.entry().record());
         }
 
         return lastOffset;
@@ -317,10 +304,14 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
 
     private void initStore(String path) throws StoreInitializationException {
         try {
-            store = (path == null ? File.createTempFile("write-ahead", ".db") : new File(path));
 
-            storeWriter = new AppendOnlyLogStoreWriter(store);
-            storeReader = new AppendOnlyLogStoreReader(store);
+            store = (path == null ? File.createTempFile("wal-", ".db") : new File(path));
+
+            storeWriter = new StoreWriter();
+            storeReader = new StoreReader();
+
+            outboxStore = new OutboxStore(store);
+
         } catch (IOException fne) {
             throw new StoreInitializationException(fne);
         }
@@ -341,7 +332,6 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
                     .forEach(entrySet -> {
                         lastOffset = entrySet.offset();
                         indexes.put(entrySet.entry().record().key(), lastOffset);
-                        outboxEntries.put(entrySet.entry().record().key(), false);
                     });
         } catch (IOException e) {
             System.err.println("Error whilst indexing: " + e.getMessage());
@@ -394,6 +384,251 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
         } catch (StoreInitializationException | IOException e) {
             e.printStackTrace();
         }
+    }
+
+    public class StoreReader implements Closeable {
+
+        private final LogStoreEntryInput storeInput;
+
+        public StoreReader() throws StoreInitializationException {
+            try {
+                storeInput = new LogStoreEntryInput(store);
+
+            } catch (FileNotFoundException fne) {
+                throw new StoreInitializationException(fne);
+            }
+        }
+
+        @Override
+        public void close() throws IOException {
+            storeInput.close();
+        }
+
+        public Optional<LogStoreRecord> readLogRecordAt(long offset) throws IOException {
+            Optional<LogStoreEntrySet<LogStoreRecord>> optionalEntry = storeInput.getEntryAt(offset);
+
+            return (!optionalEntry.isEmpty() ? Optional.of(optionalEntry.get().entry().record()) : Optional.empty());
+        }
+
+        public Optional<LogStoreCDCRecord> readCDCRecordAt(long offset) throws IOException {
+            Optional<LogStoreEntrySet<LogStoreCDCRecord>> optionalEntry = storeInput.getCDCEntryAt(offset);
+
+            return (!optionalEntry.isEmpty() ? Optional.of(optionalEntry.get().entry().record()) : Optional.empty());
+        }
+
+        Optional<LogStoreEntrySet<LogStoreRecord>> readStoreEntryAt(long offset) throws IOException {
+            return storeInput.getEntryAt(offset);
+        }
+
+        List<LogStoreEntrySet<LogStoreRecord>> readCompletedLogEntries() throws IOException {
+            return storeInput.getCompleteLogEntries();
+        }
+
+    }
+
+    private class StoreWriter implements Closeable {
+
+        private final LogStoreEntryOuput storeOutput;
+
+        public StoreWriter() throws StoreInitializationException {
+            try {
+
+                storeOutput = new LogStoreEntryOuput(store);
+                storeOutput.seek(storeOutput.length());
+
+            } catch (IOException e) {
+                throw new StoreInitializationException(e);
+            }
+        }
+
+        @Override
+        public void close() throws IOException {
+            storeOutput.close();
+        }
+
+        public void clear() throws IOException {
+            storeOutput.setLength(0);
+        }
+
+        @SuppressWarnings("unchecked")
+        public LogStoreEntrySet<LogStoreRecord> insertRecord(String key, String value) throws IOException {
+            return (LogStoreEntrySet<LogStoreRecord>) insertRecord(LogStoreEntry.TYPE_LOG_ENTRY,
+                    new LogStoreRecord(key, value));
+        }
+
+        @SuppressWarnings("unchecked")
+        public <T> LogStoreEntrySet<LogStoreCDCRecord> insertCDCRecord(byte type, long timestamp, Object event)
+                throws IOException {
+            return (LogStoreEntrySet<LogStoreCDCRecord>) insertRecord(LogStoreEntry.TYPE_CDC_ENTRY,
+                    new LogStoreCDCRecord(type, timestamp, event));
+        }
+
+        private LogStoreEntrySet<? extends LogStoreEntryPayload> insertRecord(byte type, LogStoreEntryPayload payload)
+                throws IOException {
+            long lastOffset = storeOutput.getFilePointer();
+            LogStoreEntry<LogStoreEntryPayload> storeEntry = storeOutput.putEntry(type, payload);
+
+            return new LogStoreEntrySet<LogStoreEntryPayload>(lastOffset, (storeOutput.pos() - lastOffset), storeEntry);
+        }
+
+    }
+
+    private final class OutboxStore {
+
+        private final Path outboxPath;
+        private final Path tmpOutboxPath;
+
+        private final List<Function<LogStoreEvent, Void>> outboxListeners;
+
+        private volatile List<UnpublishedOutboxEntry> unpublishedEntries;
+
+        private final Object stateMonitor;
+        private final ScheduledExecutorService backupExecutorService;
+
+        public OutboxStore(File logStore) throws IOException {
+            if (logStore == null || !logStore.isFile()) {
+                throw new IllegalArgumentException("Invalid store file. outboxStore must be a file.");
+            }
+
+            String logStoreName = logStore.getName();
+
+            logStoreName = logStoreName.replace("wal-", "");
+            logStoreName = logStoreName.replace(".db", "");
+
+            String outboxFileName = "outbox-" + logStoreName;
+
+            outboxPath = Paths.get(logStore.getParent(),  outboxFileName + ".bin");
+            tmpOutboxPath = Paths.get(logStore.getParent(), outboxFileName + ".tmp");
+
+            unpublishedEntries = new LinkedList<>();
+            outboxListeners = new LinkedList<>();
+
+            stateMonitor = new Object();
+
+            backupExecutorService = Executors.newScheduledThreadPool(1);
+            backupExecutorService.scheduleWithFixedDelay(new OutboxBackupThread(), 0, 3, TimeUnit.SECONDS);
+
+            loadState();
+        }
+
+        public void recordInserted(LogStoreEntrySet<LogStoreCDCRecord> cdcRecordSet) {
+            synchronized (stateMonitor) {
+                unpublishedEntries
+                        .add(new UnpublishedOutboxEntry(cdcRecordSet.entry().record().timestamp(),
+                                cdcRecordSet.offset()));
+            }
+        }
+
+        public void registerListener(Function<LogStoreEvent, Void> listener) {
+            if (listener == null) {
+                throw new IllegalArgumentException("listener cannot be null.");
+            }
+
+            outboxListeners.add(listener);
+        }
+
+        public void publishEvents() {
+            synchronized (stateMonitor) {
+                notifyListeners();
+            }
+        }
+
+        private void loadState() throws IOException {
+            if (!Files.exists(outboxPath) || Files.size(outboxPath) == 0) {
+                return;
+            }
+
+            try (RandomAccessFile outbox = new RandomAccessFile(outboxPath.toFile(), "r")) {
+                int size = outbox.readInt();
+
+                if (size <= 0) {
+                    return;
+                }
+
+                List<UnpublishedOutboxEntry> entries = new LinkedList<>();
+                for (int i = 0; i < size; i++) {
+                    entries.add(UnpublishedOutboxEntry.createFromInput(outbox));
+                }
+
+                synchronized (stateMonitor) {
+                    unpublishedEntries = entries;
+                }
+            }
+        }
+
+        private void notifyListeners() {
+            unpublishedEntries
+                    .stream()
+                    .forEach(entry -> {
+                        outboxListeners.forEach(listener -> {
+                            long eventId = entry.id();
+                            long offset = entry.offset();
+
+                            Optional<LogStoreCDCRecord> cdcRecord = Optional.empty();
+
+                            try {
+                                cdcRecord = storeReader.readCDCRecordAt(offset);
+                            } catch (IOException e) {
+                                System.err.println("Error while fetching CDC entry for log at offset " +
+                                        offset + ": "
+                                        + e.getMessage());
+                            }
+
+                            if (cdcRecord.isPresent() && cdcRecord.get().timestamp() == eventId) {
+                                try {
+                                    listener.apply((LogStoreEvent) cdcRecord.get().event());
+                                } catch (Exception e) {
+                                    System.err
+                                            .println("Ignoring the error that occurred whilst calling outbox listener: "
+                                                    + e.getMessage());
+                                }
+                            }
+                        });
+                    });
+            unpublishedEntries.clear();
+        }
+
+        private class OutboxBackupThread extends Thread {
+
+            private OutboxBackupThread() {
+                super();
+                setDaemon(true);
+            }
+
+            @Override
+            public void run() {
+                synchronized (stateMonitor) {
+                    try (OutputStream stream = Files.newOutputStream(tmpOutboxPath, StandardOpenOption.CREATE,
+                            StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING)) {
+
+                        if (!unpublishedEntries.isEmpty()) {
+                            int totalBytes = Integer.BYTES + (unpublishedEntries.size() * (UnpublishedOutboxEntry.BYTES));
+
+                            ByteBuffer outboxBuffer = ByteBuffer.allocate(totalBytes);
+
+                            outboxBuffer.putInt(unpublishedEntries.size());
+
+                            unpublishedEntries.forEach(entry -> entry.writeEntry(outboxBuffer));
+
+                            stream.write(outboxBuffer.array());
+                            stream.flush();
+                        }
+
+                    } catch (IOException e) {
+                        System.err.println("An error occurred whilst save temporary outbox: " + e.getMessage());
+                    }
+
+                    try {
+                        Files.move(tmpOutboxPath, outboxPath, StandardCopyOption.ATOMIC_MOVE,
+                                StandardCopyOption.REPLACE_EXISTING);
+                    } catch (IOException e) {
+                        System.err.println("An error occurred whilst saving outbox: " + e.getMessage());
+                    }
+                }
+            }
+
+        }
+
     }
 
 }
