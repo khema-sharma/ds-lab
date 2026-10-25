@@ -168,6 +168,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
     public void close() throws IOException {
         storeWriter.close();
         storeReader.close();
+        outboxStore.close();
 
         replicatorService.shutdownNow();
     }
@@ -382,11 +383,11 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
 
     public class StoreReader implements Closeable {
 
-        private final LogStoreEntryInput storeInput;
+        private final LogStoreInput storeInput;
 
         public StoreReader() throws StoreInitializationException {
             try {
-                storeInput = new LogStoreEntryInput(store);
+                storeInput = new LogStoreInput(store);
 
             } catch (FileNotFoundException fne) {
                 throw new StoreInitializationException(fne);
@@ -424,12 +425,12 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
 
     private class StoreWriter implements Closeable {
 
-        private final LogStoreEntryOuput storeOutput;
+        private final LogStoreOuput storeOutput;
 
         public StoreWriter() throws StoreInitializationException {
             try {
 
-                storeOutput = new LogStoreEntryOuput(store);
+                storeOutput = new LogStoreOuput(store);
                 storeOutput.seek(storeOutput.length());
 
             } catch (IOException e) {
@@ -464,7 +465,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
 
     }
 
-    private final class OutboxStore {
+    private final class OutboxStore implements Closeable {
 
         private final Path outboxPath;
         private final Path tmpOutboxPath;
@@ -500,6 +501,12 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
             backupExecutorService.scheduleWithFixedDelay(new OutboxBackupThread(), 0, 3, TimeUnit.SECONDS);
 
             loadState();
+        }
+
+        @Override
+        public void close() throws IOException {
+            backupExecutorService.shutdownNow();
+            saveUnpublishedOutbox();
         }
 
         public void recordInserted(LogStoreEntrySet cdcRecordSet) {
@@ -579,6 +586,38 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
             unpublishedEntries.clear();
         }
 
+        private void saveUnpublishedOutbox() {
+            synchronized (stateMonitor) {
+                try (OutputStream stream = Files.newOutputStream(tmpOutboxPath, StandardOpenOption.CREATE,
+                        StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING)) {
+
+                    if (!unpublishedEntries.isEmpty()) {
+                        int totalBytes = Integer.BYTES
+                                + (unpublishedEntries.size() * (UnpublishedOutboxEntry.BYTES));
+
+                        ByteBuffer outboxBuffer = ByteBuffer.allocate(totalBytes);
+
+                        outboxBuffer.putInt(unpublishedEntries.size());
+
+                        unpublishedEntries.forEach(entry -> entry.writeEntry(outboxBuffer));
+
+                        stream.write(outboxBuffer.array());
+                        stream.flush();
+                    }
+
+                } catch (IOException e) {
+                    System.err.println("An error occurred whilst save temporary outbox: " + e.getMessage());
+                }
+
+                try {
+                    Files.move(tmpOutboxPath, outboxPath, StandardCopyOption.ATOMIC_MOVE,
+                            StandardCopyOption.REPLACE_EXISTING);
+                } catch (IOException e) {
+                    System.err.println("An error occurred whilst saving outbox: " + e.getMessage());
+                }
+            }
+        }
+
         private class OutboxBackupThread extends Thread {
 
             private OutboxBackupThread() {
@@ -588,35 +627,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
 
             @Override
             public void run() {
-                synchronized (stateMonitor) {
-                    try (OutputStream stream = Files.newOutputStream(tmpOutboxPath, StandardOpenOption.CREATE,
-                            StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING)) {
-
-                        if (!unpublishedEntries.isEmpty()) {
-                            int totalBytes = Integer.BYTES
-                                    + (unpublishedEntries.size() * (UnpublishedOutboxEntry.BYTES));
-
-                            ByteBuffer outboxBuffer = ByteBuffer.allocate(totalBytes);
-
-                            outboxBuffer.putInt(unpublishedEntries.size());
-
-                            unpublishedEntries.forEach(entry -> entry.writeEntry(outboxBuffer));
-
-                            stream.write(outboxBuffer.array());
-                            stream.flush();
-                        }
-
-                    } catch (IOException e) {
-                        System.err.println("An error occurred whilst save temporary outbox: " + e.getMessage());
-                    }
-
-                    try {
-                        Files.move(tmpOutboxPath, outboxPath, StandardCopyOption.ATOMIC_MOVE,
-                                StandardCopyOption.REPLACE_EXISTING);
-                    } catch (IOException e) {
-                        System.err.println("An error occurred whilst saving outbox: " + e.getMessage());
-                    }
-                }
+                saveUnpublishedOutbox();
             }
 
         }

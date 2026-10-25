@@ -5,11 +5,11 @@ import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 
-public final class LogStoreEntryOuput extends RandomLogStoreAccess {
+public final class LogStoreOuput extends RandomLogStoreAccess {
 
     public static final int RECORD_OFFSET = (Byte.BYTES + Integer.BYTES + Long.BYTES);
 
-    public LogStoreEntryOuput(File file) throws FileNotFoundException {
+    public LogStoreOuput(File file) throws FileNotFoundException {
         super(file, "rwd");
     }
 

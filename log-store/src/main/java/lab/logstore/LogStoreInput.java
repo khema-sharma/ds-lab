@@ -7,11 +7,11 @@ import java.util.LinkedList;
 import java.util.List;
 import java.util.Optional;
 
-public class LogStoreEntryInput extends RandomLogStoreAccess {
+public class LogStoreInput extends RandomLogStoreAccess {
 
     private final Object readMonitor;
 
-    public LogStoreEntryInput(File file) throws FileNotFoundException {
+    public LogStoreInput(File file) throws FileNotFoundException {
         super(file, "r");
 
         readMonitor = new Object();
@@ -76,15 +76,23 @@ public class LogStoreEntryInput extends RandomLogStoreAccess {
     }
 
     Optional<LogStoreEntrySet> getDataEntry() throws IOException {
+        return getLogEntry(LogStoreEntry.TYPE_DATA_ENTRY);
+    }
+
+    Optional<LogStoreEntrySet> getCdcEntry() throws IOException {
+        return getLogEntry(LogStoreEntry.TYPE_CDC_ENTRY);
+    }
+
+    private Optional<LogStoreEntrySet> getLogEntry(byte expectedType) throws IOException {
         long entryOffset = pos();
 
         synchronized (readMonitor) {
             try {
-
                 byte type = (byte) readByte();
 
-                if (!LogStoreEntry.isValidEntryType(type)) {
-                    throw new IllegalStateException("Invalid entry type.");
+                if (type != expectedType) {
+                    throw new IllegalStateException(
+                            "Read unexpected type from the stream, expected " + expectedType + ", read " + type);
                 }
 
                 int length = readInt();
@@ -98,16 +106,12 @@ public class LogStoreEntryInput extends RandomLogStoreAccess {
                     throw new IllegalStateException("Invalid record, checksum mismatch.");
                 }
 
-                Optional<DataRecord> record = DataRecord.createFromPayload(recordBytes);
-
-                if (record.isEmpty()) {
-                    throw new IllegalStateException("Could not parse record from the stream.");
-                }
-
-                long entryLength = (pos() - entryOffset);
-
-                return Optional.of(new LogStoreEntrySet(entryOffset, entryLength,
-                        new DataEntry(length, actualChecksum, record.get())));
+                return switch (type) {
+                    case LogStoreEntry.TYPE_DATA_ENTRY ->
+                        getDataEntry(entryOffset, length, actualChecksum, recordBytes);
+                    case LogStoreEntry.TYPE_CDC_ENTRY -> getCdcEntry(entryOffset, length, actualChecksum, recordBytes);
+                    default -> throw new IllegalStateException();
+                };
 
             } catch (IllegalStateException ise) {
                 System.err.println("An error occurred while reading record entry: " + ise.getMessage());
@@ -117,46 +121,32 @@ public class LogStoreEntryInput extends RandomLogStoreAccess {
         }
     }
 
-    Optional<LogStoreEntrySet> getCdcEntry() throws IOException {
-        long entryOffset = pos();
+    private Optional<LogStoreEntrySet> getDataEntry(long entryOffset, int length, long actualChecksum,
+            byte[] recordBytes) throws IOException {
+        Optional<DataRecord> record = DataRecord.createFromPayload(recordBytes);
 
-        synchronized (readMonitor) {
-            try {
-
-                byte type = (byte) readByte();
-
-                if (!LogStoreEntry.isValidEntryType(type)) {
-                    throw new IllegalStateException("Invalid entry type.");
-                }
-
-                int length = readInt();
-                long expectedChecksum = readLong();
-                byte[] recordBytes = new byte[length];
-
-                readFully(recordBytes);
-
-                long actualChecksum = getChecksum(recordBytes);
-                if (expectedChecksum != actualChecksum) {
-                    throw new IllegalStateException("Invalid record, checksum mismatch.");
-                }
-
-                Optional<CdcRecord> record = CdcRecord.createFromPayload(recordBytes);
-
-                if (record.isEmpty()) {
-                    throw new IllegalStateException("Could not parse record from the stream.");
-                }
-
-                long entryLength = (pos() - entryOffset);
-
-                return Optional.of(new LogStoreEntrySet(entryOffset, entryLength,
-                        new CdcEntry(length, actualChecksum, record.get())));
-
-            } catch (IllegalStateException ise) {
-                System.err.println("An error occurred while reading record entry: " + ise.getMessage());
-            }
-
-            return Optional.empty();
+        if (record.isEmpty()) {
+            throw new IllegalStateException("Could not parse record from the stream.");
         }
+
+        long entryLength = (pos() - entryOffset);
+
+        return Optional.of(new LogStoreEntrySet(entryOffset, entryLength,
+                new DataEntry(length, actualChecksum, record.get())));
+    }
+
+    private Optional<LogStoreEntrySet> getCdcEntry(long entryOffset, int length, long actualChecksum,
+            byte[] recordBytes) throws IOException {
+        Optional<CdcRecord> record = CdcRecord.createFromPayload(recordBytes);
+
+        if (record.isEmpty()) {
+            throw new IllegalStateException("Could not parse record from the stream.");
+        }
+
+        long entryLength = (pos() - entryOffset);
+
+        return Optional.of(new LogStoreEntrySet(entryOffset, entryLength,
+                new CdcEntry(length, actualChecksum, record.get())));
     }
 
 }

@@ -297,7 +297,7 @@ public class LogStoreTest {
 
         RandomAccessFile storeFile = new RandomAccessFile(store.getFile(), "rw");
 
-        storeFile.setLength(cdcStartOffset + LogStoreEntryOuput.RECORD_OFFSET + 1);
+        storeFile.setLength(cdcStartOffset + LogStoreOuput.RECORD_OFFSET + 1);
         storeFile.close();
     }
 
