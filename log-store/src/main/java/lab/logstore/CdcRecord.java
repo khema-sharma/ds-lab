@@ -20,12 +20,12 @@ import java.util.Optional;
  * @param key
  * @param value
  */
-public record LogStoreCDCRecord(byte type, long timestamp, Object event) implements LogStoreEntryPayload {
+public record CdcRecord(byte type, long timestamp, Object event) implements LogStoreEntryPayload {
     public static final byte TYPE_INSERT = 1;
     public static final byte TYPE_UPDATE = 2;
     public static final byte TYPE_DELETE = 3;
 
-    public static Optional<LogStoreCDCRecord> createFromPayload(byte[] recordPayload) {
+    public static Optional<CdcRecord> createFromPayload(byte[] recordPayload) {
         if (recordPayload == null || recordPayload.length == 0) {
             throw new IllegalArgumentException("payload cannot empty.");
         }
@@ -55,7 +55,7 @@ public record LogStoreCDCRecord(byte type, long timestamp, Object event) impleme
                 }
             }
 
-            return Optional.of(new LogStoreCDCRecord(type, timestamp, event));
+            return Optional.of(new CdcRecord(type, timestamp, event));
 
         } catch (Exception e) {
             System.err.println("Error while deserializing CDC record: " + e.getMessage());
@@ -71,7 +71,7 @@ public record LogStoreCDCRecord(byte type, long timestamp, Object event) impleme
         };
     }
 
-    public LogStoreCDCRecord {
+    public CdcRecord {
         if (event == null) {
             throw new IllegalArgumentException("event cannot be blank.");
         }

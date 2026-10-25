@@ -12,9 +12,9 @@ import java.util.Optional;
  * @param key
  * @param value
  */
-public record LogStoreRecord(String key, String value) implements LogStoreEntryPayload {
+public record DataRecord(String key, String value) implements LogStoreEntryPayload {
 
-    public static Optional<LogStoreRecord> createFromPayload(byte[] recordPayload) {
+    public static Optional<DataRecord> createFromPayload(byte[] recordPayload) {
         try {
 
             String key = null;
@@ -32,7 +32,7 @@ public record LogStoreRecord(String key, String value) implements LogStoreEntryP
 
             value = new String(valueBytes, "utf-8");
 
-            return Optional.of(new LogStoreRecord(key, value));
+            return Optional.of(new DataRecord(key, value));
 
         } catch (UnsupportedEncodingException e) {
         }

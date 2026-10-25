@@ -13,7 +13,7 @@ public final class LogStoreEntryOuput extends RandomLogStoreAccess {
         super(file, "rwd");
     }
 
-    public LogStoreEntry<LogStoreEntryPayload> putEntry(byte type, LogStoreEntryPayload payload) throws IOException {
+    public LogStoreEntry putEntry(byte type, LogStoreEntryPayload payload) throws IOException {
         byte[] data = payload.getPayload();
         long checksum = getChecksum(data);
 
@@ -24,8 +24,12 @@ public final class LogStoreEntryOuput extends RandomLogStoreAccess {
                 .putLong(checksum)
                 .put(data)
                 .array());
-        
-        return new LogStoreEntry<LogStoreEntryPayload>(type, data.length, checksum, payload);
+
+        return switch (type) {
+            case LogStoreEntry.TYPE_DATA_ENTRY -> new DataEntry(data.length, checksum, (DataRecord) payload);
+            case LogStoreEntry.TYPE_CDC_ENTRY -> new CdcEntry(data.length, checksum, (CdcRecord) payload);
+            default -> throw new IllegalStateException();
+        };
     }
 
 }

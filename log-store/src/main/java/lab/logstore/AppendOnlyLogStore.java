@@ -1,24 +1,18 @@
 package lab.logstore;
 
-import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
 import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.IOException;
-import java.io.InputStream;
-import java.io.ObjectInputStream;
 import java.io.OutputStream;
 import java.io.RandomAccessFile;
 import java.nio.ByteBuffer;
-import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.text.MessageFormat;
-import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedList;
 import java.util.List;
@@ -144,7 +138,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
 
         long writeOffset = indexes.get(key);
 
-        idempotentOps.put(idempotencyKey, new LogRecordOffset(writeOffset, new LogStoreRecord(key, value)));
+        idempotentOps.put(idempotencyKey, new LogRecordOffset(writeOffset, new DataRecord(key, value)));
 
         return writeOffset;
     }
@@ -159,7 +153,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
             return null;
         }
 
-        Optional<LogStoreRecord> record = storeReader.readLogRecordAt(indexes.get(key));
+        Optional<DataRecord> record = storeReader.readLogRecordAt(indexes.get(key));
 
         return (record.isPresent() ? record.get().value() : null);
     }
@@ -219,7 +213,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
         follower.togglePartitioned();
     }
 
-    void replicateRecord(int leaderTerm, LogStoreRecord record) throws IOException {
+    void replicateRecord(int leaderTerm, DataRecord record) throws IOException {
         int latestTerm = ReplicationState.getCurrentTerm();
 
         if (latestTerm > leaderTerm) {
@@ -236,7 +230,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
         replicationCallsWaitLatch.get().await(5, TimeUnit.SECONDS);
     }
 
-    Optional<LogStoreEntrySet<LogStoreRecord>> getLastEntry() throws IOException {
+    Optional<LogStoreEntrySet> getLastEntry() throws IOException {
         return storeReader.readStoreEntryAt(lastOffset);
     }
 
@@ -285,8 +279,8 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
     private long writeRecord(String key, String value) throws IOException {
         long timestamp = System.currentTimeMillis();
 
-        LogStoreEntrySet<LogStoreRecord> storeEntry = storeWriter.insertRecord(key, value);
-        LogStoreEntrySet<LogStoreCDCRecord> cdcEntry = storeWriter.insertCDCRecord(LogStoreCDCRecord.TYPE_INSERT,
+        LogStoreEntrySet storeEntry = storeWriter.insertRecord(key, value);
+        LogStoreEntrySet cdcEntry = storeWriter.insertCDCRecord(CdcRecord.TYPE_INSERT,
                 timestamp, new LogStoreInsertEvent(key, value));
 
         lastOffset = storeEntry.offset();
@@ -296,7 +290,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
         outboxStore.recordInserted(cdcEntry);
 
         if (isLeader()) {
-            replicateRecordToFollowers(storeEntry.entry().record());
+            replicateRecordToFollowers(((DataEntry) storeEntry.entry()).record());
         }
 
         return lastOffset;
@@ -331,14 +325,14 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
                     .stream()
                     .forEach(entrySet -> {
                         lastOffset = entrySet.offset();
-                        indexes.put(entrySet.entry().record().key(), lastOffset);
+                        indexes.put(((DataEntry) entrySet.entry()).record().key(), lastOffset);
                     });
         } catch (IOException e) {
             System.err.println("Error whilst indexing: " + e.getMessage());
         }
     }
 
-    private void replicateRecordToFollowers(LogStoreRecord record) {
+    private void replicateRecordToFollowers(DataRecord record) {
         if (!isLeader()) {
             throw new IllegalStateException();
         }
@@ -372,7 +366,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
         return LogStoreRole.FOLLOWER.equals(role);
     }
 
-    private record LogRecordOffset(long offset, LogStoreRecord record) {
+    private record LogRecordOffset(long offset, DataRecord record) {
     }
 
     public static void main(String[] args) {
@@ -404,23 +398,25 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
             storeInput.close();
         }
 
-        public Optional<LogStoreRecord> readLogRecordAt(long offset) throws IOException {
-            Optional<LogStoreEntrySet<LogStoreRecord>> optionalEntry = storeInput.getEntryAt(offset);
+        public Optional<DataRecord> readLogRecordAt(long offset) throws IOException {
+            Optional<LogStoreEntrySet> optionalEntry = storeInput.getEntryAt(offset);
 
-            return (!optionalEntry.isEmpty() ? Optional.of(optionalEntry.get().entry().record()) : Optional.empty());
+            return (optionalEntry.isPresent() ? Optional.of(((DataEntry) optionalEntry.get().entry()).record())
+                    : Optional.empty());
         }
 
-        public Optional<LogStoreCDCRecord> readCDCRecordAt(long offset) throws IOException {
-            Optional<LogStoreEntrySet<LogStoreCDCRecord>> optionalEntry = storeInput.getCDCEntryAt(offset);
+        public Optional<CdcRecord> readCDCRecordAt(long offset) throws IOException {
+            Optional<LogStoreEntrySet> optionalEntry = storeInput.getCDCEntryAt(offset);
 
-            return (!optionalEntry.isEmpty() ? Optional.of(optionalEntry.get().entry().record()) : Optional.empty());
+            return (optionalEntry.isPresent() ? Optional.of(((CdcEntry) optionalEntry.get().entry()).record())
+                    : Optional.empty());
         }
 
-        Optional<LogStoreEntrySet<LogStoreRecord>> readStoreEntryAt(long offset) throws IOException {
+        Optional<LogStoreEntrySet> readStoreEntryAt(long offset) throws IOException {
             return storeInput.getEntryAt(offset);
         }
 
-        List<LogStoreEntrySet<LogStoreRecord>> readCompletedLogEntries() throws IOException {
+        List<LogStoreEntrySet> readCompletedLogEntries() throws IOException {
             return storeInput.getCompleteLogEntries();
         }
 
@@ -450,25 +446,20 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
             storeOutput.setLength(0);
         }
 
-        @SuppressWarnings("unchecked")
-        public LogStoreEntrySet<LogStoreRecord> insertRecord(String key, String value) throws IOException {
-            return (LogStoreEntrySet<LogStoreRecord>) insertRecord(LogStoreEntry.TYPE_LOG_ENTRY,
-                    new LogStoreRecord(key, value));
+        public LogStoreEntrySet insertRecord(String key, String value) throws IOException {
+            return insertRecord(LogStoreEntry.TYPE_DATA_ENTRY, new DataRecord(key, value));
         }
 
-        @SuppressWarnings("unchecked")
-        public <T> LogStoreEntrySet<LogStoreCDCRecord> insertCDCRecord(byte type, long timestamp, Object event)
+        public LogStoreEntrySet insertCDCRecord(byte type, long timestamp, Object event)
                 throws IOException {
-            return (LogStoreEntrySet<LogStoreCDCRecord>) insertRecord(LogStoreEntry.TYPE_CDC_ENTRY,
-                    new LogStoreCDCRecord(type, timestamp, event));
+            return insertRecord(LogStoreEntry.TYPE_CDC_ENTRY, new CdcRecord(type, timestamp, event));
         }
 
-        private LogStoreEntrySet<? extends LogStoreEntryPayload> insertRecord(byte type, LogStoreEntryPayload payload)
-                throws IOException {
+        private LogStoreEntrySet insertRecord(byte type, LogStoreEntryPayload payload) throws IOException {
             long lastOffset = storeOutput.getFilePointer();
-            LogStoreEntry<LogStoreEntryPayload> storeEntry = storeOutput.putEntry(type, payload);
+            LogStoreEntry storeEntry = storeOutput.putEntry(type, payload);
 
-            return new LogStoreEntrySet<LogStoreEntryPayload>(lastOffset, (storeOutput.pos() - lastOffset), storeEntry);
+            return new LogStoreEntrySet(lastOffset, (storeOutput.pos() - lastOffset), storeEntry);
         }
 
     }
@@ -497,7 +488,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
 
             String outboxFileName = "outbox-" + logStoreName;
 
-            outboxPath = Paths.get(logStore.getParent(),  outboxFileName + ".bin");
+            outboxPath = Paths.get(logStore.getParent(), outboxFileName + ".bin");
             tmpOutboxPath = Paths.get(logStore.getParent(), outboxFileName + ".tmp");
 
             unpublishedEntries = new LinkedList<>();
@@ -511,10 +502,10 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
             loadState();
         }
 
-        public void recordInserted(LogStoreEntrySet<LogStoreCDCRecord> cdcRecordSet) {
+        public void recordInserted(LogStoreEntrySet cdcRecordSet) {
             synchronized (stateMonitor) {
                 unpublishedEntries
-                        .add(new UnpublishedOutboxEntry(cdcRecordSet.entry().record().timestamp(),
+                        .add(new UnpublishedOutboxEntry(((CdcEntry) cdcRecordSet.entry()).record().timestamp(),
                                 cdcRecordSet.offset()));
             }
         }
@@ -564,7 +555,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
                             long eventId = entry.id();
                             long offset = entry.offset();
 
-                            Optional<LogStoreCDCRecord> cdcRecord = Optional.empty();
+                            Optional<CdcRecord> cdcRecord = Optional.empty();
 
                             try {
                                 cdcRecord = storeReader.readCDCRecordAt(offset);
@@ -602,7 +593,8 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
                             StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING)) {
 
                         if (!unpublishedEntries.isEmpty()) {
-                            int totalBytes = Integer.BYTES + (unpublishedEntries.size() * (UnpublishedOutboxEntry.BYTES));
+                            int totalBytes = Integer.BYTES
+                                    + (unpublishedEntries.size() * (UnpublishedOutboxEntry.BYTES));
 
                             ByteBuffer outboxBuffer = ByteBuffer.allocate(totalBytes);
 

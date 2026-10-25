@@ -8,5 +8,5 @@ package lab.logstore;
  * @param length Length of the entry
  * @param entry Log store entry
  */
-public record LogStoreEntrySet<T extends LogStoreEntryPayload>(long offset, long length, LogStoreEntry<T> entry) {
+public record LogStoreEntrySet(long offset, long length, LogStoreEntry entry) {
 }

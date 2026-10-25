@@ -17,47 +17,47 @@ public class LogStoreEntryInput extends RandomLogStoreAccess {
         readMonitor = new Object();
     }
 
-    public Optional<LogStoreEntrySet<LogStoreRecord>> getEntryAt(long offset) throws IOException {
+    public Optional<LogStoreEntrySet> getEntryAt(long offset) throws IOException {
         if (offset < 0 || offset > length()) {
             throw new IllegalArgumentException("offset must be between 0 and length of the store.");
         }
 
         synchronized (readMonitor) {
             seek(offset);
-            return getRecordEntry();
+            return getDataEntry();
         }
     }
 
-    public Optional<LogStoreEntrySet<LogStoreCDCRecord>> getCDCEntryAt(long offset) throws IOException {
+    public Optional<LogStoreEntrySet> getCDCEntryAt(long offset) throws IOException {
         if (offset < 0 || offset > length()) {
             throw new IllegalArgumentException("offset must be between 0 and length of the store.");
         }
 
         synchronized (readMonitor) {
             seek(offset);
-            return getCDCEntry();
+            return getCdcEntry();
         }
     }
 
-    public List<LogStoreEntrySet<LogStoreRecord>> getCompleteLogEntries() throws IOException {
+    public List<LogStoreEntrySet> getCompleteLogEntries() throws IOException {
         long lastPos = pos();
-        List<LogStoreEntrySet<LogStoreRecord>> allRecordEntries = new LinkedList<>();
+        List<LogStoreEntrySet> allRecordEntries = new LinkedList<>();
 
         while (!isEOF()) {
             long previousPos = pos();
 
             try {
-                Optional<LogStoreEntrySet<LogStoreRecord>> recordEntrySet = getRecordEntry();
+                Optional<LogStoreEntrySet> recordEntrySet = getDataEntry();
 
                 if (recordEntrySet.isPresent()) {
-                    if (!recordEntrySet.get().entry().isLogEntry()) {
+                    if (!(recordEntrySet.get().entry() instanceof DataEntry)) {
                         break;
                     }
 
-                    Optional<LogStoreEntrySet<LogStoreCDCRecord>> cdcEntrySet = getCDCEntry();
+                    Optional<LogStoreEntrySet> cdcEntrySet = getCdcEntry();
 
                     if (cdcEntrySet.isPresent()) {
-                        if (!cdcEntrySet.get().entry().isCDCEntry()) {
+                        if (!(cdcEntrySet.get().entry() instanceof CdcEntry)) {
                             break;
                         }
 
@@ -75,7 +75,7 @@ public class LogStoreEntryInput extends RandomLogStoreAccess {
         return allRecordEntries;
     }
 
-    Optional<LogStoreEntrySet<LogStoreRecord>> getRecordEntry() throws IOException {
+    Optional<LogStoreEntrySet> getDataEntry() throws IOException {
         long entryOffset = pos();
 
         synchronized (readMonitor) {
@@ -98,7 +98,7 @@ public class LogStoreEntryInput extends RandomLogStoreAccess {
                     throw new IllegalStateException("Invalid record, checksum mismatch.");
                 }
 
-                Optional<LogStoreRecord> record = LogStoreRecord.createFromPayload(recordBytes);
+                Optional<DataRecord> record = DataRecord.createFromPayload(recordBytes);
 
                 if (record.isEmpty()) {
                     throw new IllegalStateException("Could not parse record from the stream.");
@@ -106,13 +106,8 @@ public class LogStoreEntryInput extends RandomLogStoreAccess {
 
                 long entryLength = (pos() - entryOffset);
 
-                LogStoreEntry<LogStoreRecord> recordEntry = new LogStoreEntry<LogStoreRecord>(type, length,
-                        actualChecksum, record.get());
-
-                LogStoreEntrySet<LogStoreRecord> entrySet = new LogStoreEntrySet<LogStoreRecord>(entryOffset,
-                        entryLength, recordEntry);
-
-                return Optional.of(entrySet);
+                return Optional.of(new LogStoreEntrySet(entryOffset, entryLength,
+                        new DataEntry(length, actualChecksum, record.get())));
 
             } catch (IllegalStateException ise) {
                 System.err.println("An error occurred while reading record entry: " + ise.getMessage());
@@ -122,7 +117,7 @@ public class LogStoreEntryInput extends RandomLogStoreAccess {
         }
     }
 
-    Optional<LogStoreEntrySet<LogStoreCDCRecord>> getCDCEntry() throws IOException {
+    Optional<LogStoreEntrySet> getCdcEntry() throws IOException {
         long entryOffset = pos();
 
         synchronized (readMonitor) {
@@ -145,7 +140,7 @@ public class LogStoreEntryInput extends RandomLogStoreAccess {
                     throw new IllegalStateException("Invalid record, checksum mismatch.");
                 }
 
-                Optional<LogStoreCDCRecord> record = LogStoreCDCRecord.createFromPayload(recordBytes);
+                Optional<CdcRecord> record = CdcRecord.createFromPayload(recordBytes);
 
                 if (record.isEmpty()) {
                     throw new IllegalStateException("Could not parse record from the stream.");
@@ -153,13 +148,8 @@ public class LogStoreEntryInput extends RandomLogStoreAccess {
 
                 long entryLength = (pos() - entryOffset);
 
-                LogStoreEntry<LogStoreCDCRecord> recordEntry = new LogStoreEntry<LogStoreCDCRecord>(type, length,
-                        actualChecksum, record.get());
-
-                LogStoreEntrySet<LogStoreCDCRecord> entrySet = new LogStoreEntrySet<LogStoreCDCRecord>(entryOffset,
-                        entryLength, recordEntry);
-
-                return Optional.of(entrySet);
+                return Optional.of(new LogStoreEntrySet(entryOffset, entryLength,
+                        new CdcEntry(length, actualChecksum, record.get())));
 
             } catch (IllegalStateException ise) {
                 System.err.println("An error occurred while reading record entry: " + ise.getMessage());
