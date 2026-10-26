@@ -3,6 +3,8 @@ package lab.logstore;
 import java.io.Closeable;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -58,7 +60,7 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
 
     @Override
     public String get(String key) throws IOException {
-        final ArrayList<String> valueVersions = new ArrayList<>(3);
+        final List<String> valueVersions = Collections.synchronizedList(new ArrayList<>(3));
         CountDownLatch quorumLatch = new CountDownLatch(quorumSize - 1);
 
         quorumNodes.stream().forEach(store -> {
