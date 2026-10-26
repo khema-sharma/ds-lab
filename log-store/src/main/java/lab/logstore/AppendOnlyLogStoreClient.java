@@ -3,12 +3,18 @@ package lab.logstore;
 import java.io.Closeable;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable {
 
     private final ArrayList<AppendOnlyLogStore> quorumNodes;
     private final int quorumSize;
+
+    private final ExecutorService quorumService;
 
     public AppendOnlyLogStoreClient(int qSize) throws StoreInitializationException, IOException {
         if (qSize <= 0) {
@@ -18,27 +24,34 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
         quorumSize = qSize;
         quorumNodes = new ArrayList<>(qSize);
 
+        quorumService = Executors.newFixedThreadPool(5);
+
         initQuorumNodes();
     }
 
     @Override
     public void put(String key, String value) throws IOException {
-        AtomicInteger successes = new AtomicInteger();
-        AtomicInteger counter = new AtomicInteger();
+        CountDownLatch quorumLatch = new CountDownLatch(quorumSize - 1);
 
-        quorumNodes.stream().parallel().forEach(store -> {
-            try {
-                if (counter.incrementAndGet() < quorumSize) {
+        quorumNodes.stream().forEach(store -> {
+            quorumService.submit(() -> {
+                try {
                     store.put(key, value);
-                    successes.incrementAndGet();
-                }
+                    quorumLatch.countDown();
 
-            } catch (IOException e) {
-                System.err.println("An error occurred while saving data: " + e.getMessage());
-            }
+                } catch (IOException e) {
+                    System.err.println("An error occurred while saving data: " + e.getMessage());
+                }
+            });
         });
 
-        if (successes.get() < quorumSize - 1) {
+        try {
+            quorumLatch.await(5, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            System.err.println("Quorum write latch interrupted.");
+        }
+
+        if (quorumLatch.getCount() > 0) {
             throw new IOException("Error saving data.");
         }
     }
@@ -46,19 +59,26 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
     @Override
     public String get(String key) throws IOException {
         final ArrayList<String> valueVersions = new ArrayList<>(3);
-        AtomicInteger counter = new AtomicInteger();
+        CountDownLatch quorumLatch = new CountDownLatch(quorumSize - 1);
 
-        quorumNodes.stream().parallel().forEach(store -> {
-            try {
-                if (counter.incrementAndGet() < quorumSize) {
-                    valueVersions.add(store.get(key)); 
+        quorumNodes.stream().forEach(store -> {
+            quorumService.submit(() -> {
+                try {
+                    valueVersions.add(store.get(key));
+                    quorumLatch.countDown();
+                } catch (IOException e) {
+                    System.err.println("An error occurred while retrieving data: " + e.getMessage());
                 }
-            } catch (IOException e) {
-                System.err.println("An error occurred while retrieving data: " + e.getMessage());
-            }
+            });
         });
 
-        if (valueVersions.size() < quorumSize - 1) {
+        try {
+            quorumLatch.await(5, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            System.err.println("Quorum read latch interrupted.");
+        }
+
+        if (quorumLatch.getCount() > 0) {
             throw new IOException("Error saving data.");
         }
 
