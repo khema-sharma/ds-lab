@@ -2,7 +2,7 @@
 
 ## Problem
 
-This repository is a lab for durable key-value store. The store is an append-only file. The log is the source of truth. The store adopts Single Leader Replication strategy to maintain copies of its data. It does not have a second log and it does not use a quorum to commit reads or writes.
+This repository is a lab for durable key-value store. The store is an append-only file. The log is the source of truth. The store adopts Single Leader Replication strategy to maintain copies of its data. The AppendOnlyLogStoreClient maintains a quorum to commit reads or writes.
 
 ## Design
 
@@ -43,6 +43,7 @@ The store handles following failure modes:
 - It rejects write without a corresponding Outbox entry
 - It rejects a duplicate outbox publish event
 - It rejects a duplicate outbox publish event after store reopen
+- It accepts a write and a read only of majority of the nodes in the quorum acknowledge
 
 ## Measurements
 

@@ -42,9 +42,9 @@ import java.util.function.Function;
  * <p>
  * Following methods allow to work with the store:
  * <ul>
- * <li>The {@link #write(String, String)} method writes the given {@code(key,
+ * <li>The {@link #put(String, String)} method writes the given {@code(key,
  * value)} pair to the store
- * <li>The {@link #read(String)} method return the value of the given
+ * <li>The {@link #get(String)} method return the value of the given
  * {@code key} from the store
  * </ul>
  */
@@ -70,13 +70,13 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
     private final Map<AppendOnlyLogStore, Boolean> followerStatusMap;
     private final ExecutorService replicatorService;
 
-    private final Map<IdempotencyKey, LogRecordOffset> idempotentOps;
+    private final Map<IdempotencyKey, IdempotentDataRecord> idempotentOps;
 
     private final AtomicReference<CountDownLatch> replicationCallsWaitLatch;
     private final Object leaderReplicationMonitor;
 
     public AppendOnlyLogStore() throws StoreInitializationException {
-        this((String) null);
+        this(LogStoreRole.SINGLE);
     }
 
     public AppendOnlyLogStore(LogStoreRole role) throws StoreInitializationException {
@@ -114,7 +114,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
     }
 
     @Override
-    public void write(String key, String value) throws IOException {
+    public void put(String key, String value) throws IOException {
         if (forwardToLeader(key, value)) {
             return;
         }
@@ -123,28 +123,29 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
         writeRecord(key, value);
     }
 
-    public long write(IdempotencyKey idempotencyKey, String key, String value) throws IOException {
+    @Override
+    public long put(IdempotencyKey idempotencyKey, String key, String value) throws IOException {
         if (idempotentOps.containsKey(idempotencyKey)) {
-            LogRecordOffset recordOffset = idempotentOps.get(idempotencyKey);
+            IdempotentDataRecord recordOffset = idempotentOps.get(idempotencyKey);
 
             if (recordOffset.record().key().equals(key) && recordOffset.record().value().equals(value)) {
-                return ((LogRecordOffset) idempotentOps.get(idempotencyKey)).offset();
+                return ((IdempotentDataRecord) idempotentOps.get(idempotencyKey)).timestamp();
             }
 
             throw new IllegalStateException("Given idempotency key is mapped to a different payload.");
         }
 
-        write(key, value);
+        put(key, value);
 
         long writeOffset = indexes.get(key);
 
-        idempotentOps.put(idempotencyKey, new LogRecordOffset(writeOffset, new DataRecord(key, value)));
+        idempotentOps.put(idempotencyKey, new IdempotentDataRecord(writeOffset, new DataRecord(key, value)));
 
         return writeOffset;
     }
 
     @Override
-    public String read(String key) throws IOException {
+    public String get(String key) throws IOException {
         if (key == null || key.isBlank()) {
             throw new IllegalArgumentException("key cannot be blank.");
         }
@@ -241,7 +242,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
         }
 
         if (!partitioned) {
-            leader.write(key, value);
+            leader.put(key, value);
             return true;
         }
 
@@ -249,6 +250,10 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
     }
 
     private void checkFencingTerm() {
+        if (isSingleNode()) {
+            return;
+        }
+
         int activeReplTerm = ReplicationState.getCurrentTerm();
 
         if (replicationTerm < activeReplTerm) {
@@ -281,7 +286,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
         long timestamp = System.currentTimeMillis();
 
         LogStoreEntrySet storeEntry = storeWriter.insertRecord(key, value);
-        LogStoreEntrySet cdcEntry = storeWriter.insertCDCRecord(CdcRecord.TYPE_INSERT,
+        LogStoreEntrySet cdcEntry = storeWriter.insertCdcRecord(CdcRecord.TYPE_INSERT,
                 timestamp, new LogStoreInsertEvent(key, value));
 
         lastOffset = storeEntry.offset();
@@ -359,6 +364,10 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
         }
     }
 
+    private boolean isSingleNode() {
+        return LogStoreRole.SINGLE.equals(role);
+    }
+
     private boolean isLeader() {
         return LogStoreRole.LEADER.equals(role);
     }
@@ -367,18 +376,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
         return LogStoreRole.FOLLOWER.equals(role);
     }
 
-    private record LogRecordOffset(long offset, DataRecord record) {
-    }
-
-    public static void main(String[] args) {
-        try (AppendOnlyLogStore store = new AppendOnlyLogStore()) {
-            OperationBenchmark[] benchMarks = store.benchmarkOperations();
-
-            System.out.println("Write benchmarks: " + benchMarks[0]);
-            System.out.println("Read benchmarks: " + benchMarks[1]);
-        } catch (StoreInitializationException | IOException e) {
-            e.printStackTrace();
-        }
+    private record IdempotentDataRecord(long timestamp, DataRecord record) {
     }
 
     public class StoreReader implements Closeable {
@@ -406,8 +404,8 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
                     : Optional.empty());
         }
 
-        public Optional<CdcRecord> readCDCRecordAt(long offset) throws IOException {
-            Optional<LogStoreEntrySet> optionalEntry = storeInput.getCDCEntryAt(offset);
+        public Optional<CdcRecord> readCdcRecordAt(long offset) throws IOException {
+            Optional<LogStoreEntrySet> optionalEntry = storeInput.getCdcEntryAt(offset);
 
             return (optionalEntry.isPresent() ? Optional.of(((CdcEntry) optionalEntry.get().entry()).record())
                     : Optional.empty());
@@ -451,7 +449,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
             return insertRecord(LogStoreEntry.TYPE_DATA_ENTRY, new DataRecord(key, value));
         }
 
-        public LogStoreEntrySet insertCDCRecord(byte type, long timestamp, Object event)
+        public LogStoreEntrySet insertCdcRecord(byte type, long timestamp, Object event)
                 throws IOException {
             return insertRecord(LogStoreEntry.TYPE_CDC_ENTRY, new CdcRecord(type, timestamp, event));
         }
@@ -565,7 +563,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
                             Optional<CdcRecord> cdcRecord = Optional.empty();
 
                             try {
-                                cdcRecord = storeReader.readCDCRecordAt(offset);
+                                cdcRecord = storeReader.readCdcRecordAt(offset);
                             } catch (IOException e) {
                                 System.err.println("Error while fetching CDC entry for log at offset " +
                                         offset + ": "
@@ -632,6 +630,17 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
 
         }
 
+    }
+
+    public static void main(String[] args) {
+        try (AppendOnlyLogStore store = new AppendOnlyLogStore()) {
+            OperationBenchmark[] benchMarks = store.benchmarkOperations();
+
+            System.out.println("Write benchmarks: " + benchMarks[0]);
+            System.out.println("Read benchmarks: " + benchMarks[1]);
+        } catch (StoreInitializationException | IOException e) {
+            e.printStackTrace();
+        }
     }
 
 }

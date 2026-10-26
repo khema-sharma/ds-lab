@@ -28,7 +28,7 @@ public class LogStoreInput extends RandomLogStoreAccess {
         }
     }
 
-    public Optional<LogStoreEntrySet> getCDCEntryAt(long offset) throws IOException {
+    public Optional<LogStoreEntrySet> getCdcEntryAt(long offset) throws IOException {
         if (offset < 0 || offset > length()) {
             throw new IllegalArgumentException("offset must be between 0 and length of the store.");
         }

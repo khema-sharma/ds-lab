@@ -17,7 +17,7 @@ public class InMemoryStoreTest {
     @Test
     public void rejectAppendWithBlankKey() {
         IllegalArgumentException exp = assertThrows(IllegalArgumentException.class,
-                () -> new InMemoryStore().write(null, null));
+                () -> new InMemoryStore().put(null, null));
 
         assertEquals(InMemoryStore.ERR_ILLEGAL_KEY, exp.getMessage());
     }
@@ -25,22 +25,22 @@ public class InMemoryStoreTest {
     @Test
     public void acceptsCompletedWrite() throws IOException {
         InMemoryStore store = new InMemoryStore();
-        store.write("key-1", "value-1");
+        store.put("key-1", "value-1");
 
-        assertEquals("value-1", store.read("key-1"));
+        assertEquals("value-1", store.get("key-1"));
     }
 
     @Test
     public void acceptsReadVisibility() throws InterruptedException, IOException, ExecutionException {
         InMemoryStore store = new InMemoryStore();
-        store.write("key-1", "value-1");
+        store.put("key-1", "value-1");
 
         final ExecutorService service = Executors.newFixedThreadPool(2);
 
         service.execute(() -> {
             try {
                 Thread.sleep(2);
-                store.write("key-1", "value-2");
+                store.put("key-1", "value-2");
             } catch (IOException | InterruptedException e) {
                 e.printStackTrace();
             }
@@ -53,7 +53,7 @@ public class InMemoryStoreTest {
                 String value = null;
 
                 do {
-                    value = store.read("key-1");
+                    value = store.get("key-1");
                     observedValues.add(value);
 
                 } while (value != null && !value.equals("value-2"));

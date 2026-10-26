@@ -18,7 +18,7 @@ public class InMemoryStore extends AbstractStore {
     // when it releases the lock.
     private final Object readWriteMonitor = new Object();
 
-    public void write(String key, String value) throws IOException {
+    public void put(String key, String value) throws IOException {
         if (key == null || key.isBlank()) {
             throw new IllegalArgumentException(ERR_ILLEGAL_KEY);
         }
@@ -29,7 +29,7 @@ public class InMemoryStore extends AbstractStore {
     }
 
     @Override
-    public String read(String key) throws IOException {
+    public String get(String key) throws IOException {
         synchronized (readWriteMonitor) {
             return store.get(key);
         }

@@ -5,6 +5,10 @@ import java.util.Arrays;
 
 public abstract class AbstractStore implements Store {
     
+    public long put(IdempotencyKey idempotencyKey, String key, String value) throws IOException {
+        throw new UnsupportedOperationException();
+    }
+
     /**
      * Benchmarks by writing and reading 100000 entries.
      * 
@@ -20,12 +24,12 @@ public abstract class AbstractStore implements Store {
 
         // Populate records
         for (int i = 0; i < 100000; i++) {
-            write("key-" + i, "value-" + i);
+            put("key-" + i, "value-" + i);
         }
 
         // Begin warm-up
         for (int i = 0; i < 100000; i++) {
-            this.read("key-" + i);
+            this.get("key-" + i);
         }
         // End warm-up
 
@@ -33,7 +37,7 @@ public abstract class AbstractStore implements Store {
 
         for (int i = 0; i < 100000; i++) {
             long startTime = System.nanoTime();
-            this.read("key-" + i);
+            this.get("key-" + i);
 
             readMeasurements[i] = (System.nanoTime() - startTime);
         }
@@ -52,7 +56,7 @@ public abstract class AbstractStore implements Store {
 
         // Begin warm-up
         for (int i = 0; i < 100000; i++) {
-            write("key-" + i, "value-" + i);
+            put("key-" + i, "value-" + i);
         }
 
         clear();
@@ -62,7 +66,7 @@ public abstract class AbstractStore implements Store {
 
         for (int i = 0; i < 100000; i++) {
             long startTime = System.nanoTime();
-            write("key-" + i, "value-" + i);
+            put("key-" + i, "value-" + i);
 
             writeMeasurements[i] = (System.nanoTime() - startTime);
         }
