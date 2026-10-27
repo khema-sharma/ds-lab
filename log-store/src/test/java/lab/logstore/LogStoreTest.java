@@ -3,9 +3,14 @@ package lab.logstore;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.IOException;
 import java.io.RandomAccessFile;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Random;
 import java.util.UUID;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeoutException;
@@ -286,6 +291,39 @@ public class LogStoreTest {
             assertDoesNotThrow(() -> storeClient.put("key-1", "value-1"));
             assertEquals("value-1", storeClient.get("key-1"));
         }
+    }
+
+    @Test
+    public void rejectsDisruptiveRebalance() {
+        ConsistentHashRing hashRing = new ConsistentHashRing(100);
+
+        for (int i = 1; i <= 3; i++) {
+            hashRing.addNode("node-" + i);
+        }
+
+        Map<String, String> keyToNodeMap = new HashMap<>();
+
+        for (int i = 1; i <= 1000; i++) {
+            String key = "node#" + i;
+
+            keyToNodeMap.put(key, hashRing.nodeForKey(key));
+        }
+
+        hashRing.addNode("node-4");
+
+        AtomicInteger rebalancedNodes = new AtomicInteger();
+        for (int i = 1; i <= 1000; i++) {
+            String key = "node#" + i;
+
+            String newNodeForKey = hashRing.nodeForKey(key);
+            String oldNodeForKey = keyToNodeMap.get(key);
+            
+            if (!newNodeForKey.equals(oldNodeForKey)) {
+                rebalancedNodes.incrementAndGet();
+            }
+        }
+
+        assertTrue(() -> (((float) rebalancedNodes.get()/1000) < 0.4));
     }
 
     private void tearTailRecord(AppendOnlyLogStore store) throws IOException {
