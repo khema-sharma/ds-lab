@@ -27,8 +27,7 @@ public final class ConsistentHashRing {
         }
 
         for (int i = 0; i < virtualNodesPerNode; i++) {
-            String vNodeHash = hash(nodeId + '#' + i);
-            ring.put(vNodeHash, nodeId);
+            ring.put(hash(nodeId + '#' + i), nodeId);
         }
     }
 
