@@ -25,6 +25,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Function;
 
 /**
@@ -75,6 +76,9 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
     private final AtomicReference<CountDownLatch> replicationCallsWaitLatch;
     private final Object leaderReplicationMonitor;
 
+    private final Object lockMonitor;
+    private final Map<String, ReentrantLock> rwLocks;
+
     public AppendOnlyLogStore() throws StoreInitializationException {
         this(LogStoreRole.SINGLE);
     }
@@ -97,6 +101,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
         }
 
         leaderReplicationMonitor = new Object();
+        lockMonitor = new Object();
 
         seteRole(storeRole);
 
@@ -106,6 +111,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
 
         idempotentOps = new ConcurrentHashMap<>();
         indexes = new ConcurrentHashMap<>();
+        rwLocks = new ConcurrentHashMap<>();
 
         lastOffset = 0;
         buildIndexes();
@@ -200,6 +206,29 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
 
     public void publishOutboxEntries() {
         outboxStore.publishEvents();
+    }
+
+    public void lockKey(String key) {
+        ReentrantLock keyLock = null;
+        
+        synchronized (lockMonitor) {
+            if (rwLocks.containsKey(key)) {
+                keyLock = rwLocks.get(key);
+            } else {
+                keyLock = new ReentrantLock();
+                rwLocks.put(key, keyLock);
+            }
+        }
+
+        keyLock.lock();
+    }
+
+    public void unlockKey(String key) {
+        ReentrantLock lock = rwLocks.get(key);
+        
+        if (lock!= null && lock.isHeldByCurrentThread()) {
+            lock.unlock();
+        }
     }
 
     void partitionFollower(AppendOnlyLogStore follower) {

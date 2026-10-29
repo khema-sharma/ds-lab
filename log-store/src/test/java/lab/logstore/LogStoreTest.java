@@ -7,10 +7,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.IOException;
 import java.io.RandomAccessFile;
-import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Map;
-import java.util.Random;
 import java.util.UUID;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeoutException;
@@ -317,13 +315,78 @@ public class LogStoreTest {
 
             String newNodeForKey = hashRing.nodeForKey(key);
             String oldNodeForKey = keyToNodeMap.get(key);
-            
+
             if (!newNodeForKey.equals(oldNodeForKey)) {
                 rebalancedNodes.incrementAndGet();
             }
         }
 
-        assertTrue(() -> (((float) rebalancedNodes.get()/1000) < 0.4));
+        assertTrue(() -> (((float) rebalancedNodes.get() / 1000) < 0.4));
+    }
+
+    @Test
+    public void acceptsReadAnomalyWithoutLock()
+            throws IOException, StoreInitializationException, InterruptedException {
+        try (AppendOnlyLogStore store = new AppendOnlyLogStore()) {
+            store.put("itemsCount", "1");
+
+            Thread t1 = newDecrementer(store, false);
+            Thread t2 = newDecrementer(store, false);
+
+            t1.start();
+            t2.start();
+
+            t1.join();
+            t2.join();
+
+            // Read anomaly, value should ideally be -1
+            assertEquals("0", store.get("itemsCount"));
+        }
+    }
+
+    @Test
+    public void rejectsReadAnomalyWithLock()
+            throws IOException, StoreInitializationException, InterruptedException {
+        try (AppendOnlyLogStore store = new AppendOnlyLogStore()) {
+            store.put("itemsCount", "1");
+            
+            Thread t1 = newDecrementer(store, true);
+            Thread t2 = newDecrementer(store, true);
+
+            t1.start();
+            t2.start();
+
+            t1.join();
+            t2.join();
+
+            assertEquals("-1", store.get("itemsCount"));
+        }
+    }
+
+    private Thread newDecrementer(AppendOnlyLogStore store, boolean lockKey) {
+        return new Thread() {
+            public void run() {
+                try {
+                    if (lockKey) {
+                        store.lockKey("itemsCount");
+                    }
+
+                    int itemsCount = Integer.valueOf(store.get("itemsCount"));
+                    System.out.println("Read value");
+
+                    Thread.sleep(10);
+
+                    store.put("itemsCount", Integer.toString(--itemsCount));
+                    System.out.println("Updated value");
+
+                    if (lockKey) {
+                        store.unlockKey("itemsCount");
+                    }
+                } catch (Exception e) {
+                    System.err.println("Error while decrementing count: " + e.getMessage());
+                }
+            }
+        };
     }
 
     private void tearTailRecord(AppendOnlyLogStore store) throws IOException {

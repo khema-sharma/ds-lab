@@ -44,6 +44,8 @@ The store handles following failure modes:
 - It rejects a duplicate outbox publish event
 - It rejects a duplicate outbox publish event after store reopen
 - It accepts a write and a read only of majority of the nodes in the quorum acknowledge
+- It accepts a lost read anomaly without locking
+- It rejecys a losy read anomaly with locking
 
 ## Measurements
 
