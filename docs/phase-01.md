@@ -4,7 +4,7 @@
 
 ### About the store
 
-The [AppendOnlyLogStore](../log-store/src/main/java/lab/logstore/AppendOnlyLogStore.java) is a durable key-value store. In its present form it:
+The [AppendOnlyLogStore](../log-store/src/main/java/lab/logstore/AppendOnlyLogStore.java) is a durable key-value store. In its present form it's:
 
 - writes are always sequential i.e. new inserts will always be appended
 - read operations are not sequential

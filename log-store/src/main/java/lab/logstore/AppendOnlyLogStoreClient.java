@@ -80,7 +80,7 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
         }
 
         if (quorumLatch.getCount() > 0) {
-            throw new IOException("Error saving data.");
+            throw new IOException("Error retrieving data.");
         }
 
         return valueVersions.get(0);

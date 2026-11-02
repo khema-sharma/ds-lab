@@ -196,6 +196,11 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
     public void registerFollower(AppendOnlyLogStore follower) {
         if (!followerStatusMap.containsKey(follower)) {
             followerStatusMap.put(follower, Boolean.TRUE);
+
+            if (!follower.isFollower()) {
+                follower.seteRole(LogStoreRole.FOLLOWER);
+            }
+
             follower.setLeader(this);
         }
     }
@@ -210,7 +215,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
 
     public void lockKey(String key) {
         ReentrantLock keyLock = null;
-        
+
         synchronized (lockMonitor) {
             if (rwLocks.containsKey(key)) {
                 keyLock = rwLocks.get(key);
@@ -225,10 +230,15 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
 
     public void unlockKey(String key) {
         ReentrantLock lock = rwLocks.get(key);
-        
-        if (lock!= null && lock.isHeldByCurrentThread()) {
+
+        if (lock != null && lock.isHeldByCurrentThread()) {
             lock.unlock();
         }
+    }
+
+    public void setAsLeader(int term) {
+        replicationTerm = term;
+        seteRole(LogStoreRole.LEADER);
     }
 
     void partitionFollower(AppendOnlyLogStore follower) {
