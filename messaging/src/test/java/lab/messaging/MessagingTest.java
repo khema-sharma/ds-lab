@@ -4,17 +4,19 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 
 import java.time.Duration;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Properties;
 import java.util.Set;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.apache.kafka.clients.admin.AdminClient;
 import org.apache.kafka.clients.admin.NewTopic;
 import org.apache.kafka.clients.consumer.Consumer;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
-import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.clients.producer.KafkaProducer;
@@ -27,7 +29,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.testcontainers.kafka.KafkaContainer;
 
-public class MessageTest {
+public class MessagingTest {
 
     private static KafkaContainer kafkaContainer = new KafkaContainer("apache/kafka-native:3.8.0");
 
@@ -46,7 +48,6 @@ public class MessageTest {
             adminClient.createTopics(Collections.singleton(newTopic(topic, 3)));
 
             try (Producer<String, String> kafkaProducer = newKafkaProducer()) {
-
                 // Producers wait until server acknowledges that atleast one
                 // node in the kafka cluster has received the messages.
                 //
@@ -63,8 +64,7 @@ public class MessageTest {
                         .get();
 
                 try (Consumer<String, String> kafkaConsumer = newKafkaConsumer()) {
-
-                    kafkaConsumer.subscribe(Collections.singletonList("ds-lab"));
+                    kafkaConsumer.subscribe(Collections.singletonList(topic));
 
                     int counter = 0;
                     Set<TopicPartition> partitions = new HashSet<>();
@@ -79,11 +79,64 @@ public class MessageTest {
                     }
 
                     assertEquals(1, partitions.size());
-
                 }
+            }
+        }
+    }
 
+    @Test
+    public void acceptsUnprocessedRecordsOnRebalancing() throws InterruptedException, ExecutionException {
+        String topic = "ds-lab";
+        String key = "default-key";
+
+        try (Producer<String, String> kafkaProducer = newKafkaProducer()) {
+            kafkaProducer.send(new ProducerRecord<>(topic, key, "value-1"));
+            kafkaProducer.send(new ProducerRecord<>(topic, key, "value-2"));
+            kafkaProducer.send(new ProducerRecord<>(topic, key, "value-3"));
+
+            Map<String, Long> inboxTable = new HashMap<>();
+
+            Consumer<String, String> kafkaConsumer = newKafkaConsumer();
+            Consumer<String, String> kafkaConsumer2 = newKafkaConsumer();
+
+            kafkaConsumer.subscribe(Collections.singletonList(topic));
+            kafkaConsumer2.subscribe(Collections.singletonList(topic));
+
+            int counter = 0;
+            while (counter < 2) {
+                ConsumerRecords<String, String> records = kafkaConsumer.poll(Duration.ofMillis(100));
+                
+                records.forEach(record -> {
+                    inboxTable.put(record.key(), record.offset());
+                });
+                
+                counter += records.count();
             }
 
+            // Consumer closes without committing any of the proccessed records
+            kafkaConsumer.close();
+
+            AtomicInteger applyCounter = new AtomicInteger(0);
+            counter = 0;
+
+            while (counter < 3) {
+                ConsumerRecords<String, String> records = kafkaConsumer2.poll(Duration.ofMillis(100));
+                
+                records.forEach(record -> {
+                    if (inboxTable.get(record.key()) > record.offset()) {
+                        return;
+                    }
+
+                    inboxTable.put(record.key(), record.offset());
+                    applyCounter.incrementAndGet();
+                });
+
+                counter += records.count();
+            }
+
+            assertEquals(1, applyCounter.get());
+
+            kafkaConsumer2.close();
         }
     }
 
@@ -109,7 +162,7 @@ public class MessageTest {
                 "org.apache.kafka.common.serialization.StringDeserializer");
         consumerProperties.put(ConsumerConfig.GROUP_ID_CONFIG, "ds-lab-consumers");
         consumerProperties.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
-        consumerProperties.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "true");
+        consumerProperties.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false");
 
         return new KafkaConsumer<>(consumerProperties);
     }
