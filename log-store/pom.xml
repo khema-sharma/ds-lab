@@ -12,7 +12,7 @@
   <version>1.0-SNAPSHOT</version>
 
   <name>Log store</name>
-  <url>http://www.khema.sharman/projects/eng/ds-lab/log-store</url>
+  <url>https://github.com/khema-sharma/ds-lab</url>
 
   <properties>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
@@ -42,7 +42,7 @@
       <groupId>org.junit.jupiter</groupId>
       <artifactId>junit-jupiter-params</artifactId>
       <scope>test</scope>
-    </dependency>
+    </dependency>    
   </dependencies>
 
   <build>
