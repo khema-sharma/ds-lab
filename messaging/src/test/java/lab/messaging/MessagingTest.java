@@ -91,62 +91,66 @@ public class MessagingTest {
         String topic = "ds-lab";
         String key = "default-key";
 
-        try (Producer<String, String> kafkaProducer = newKafkaProducer()) {
-            kafkaProducer.send(new ProducerRecord<>(topic, key, "value-1"));
-            kafkaProducer.send(new ProducerRecord<>(topic, key, "value-2"));
-            kafkaProducer.send(new ProducerRecord<>(topic, key, "value-3"));
+        try (AdminClient adminClient = newAdminClient()) {
+            adminClient.createTopics(Collections.singleton(newTopic(topic, 1)));
+            
+            try (Producer<String, String> kafkaProducer = newKafkaProducer()) {
+                kafkaProducer.send(new ProducerRecord<>(topic, key, "value-1"));
+                kafkaProducer.send(new ProducerRecord<>(topic, key, "value-2"));
+                kafkaProducer.send(new ProducerRecord<>(topic, key, "value-3"));
 
-            Map<String, Long> inboxTable = new HashMap<>();
+                Map<String, Long> inboxTable = new HashMap<>();
 
-            Consumer<String, String> kafkaConsumer = newKafkaConsumer();
-            Consumer<String, String> kafkaConsumer2 = newKafkaConsumer();
+                Consumer<String, String> kafkaConsumer = newKafkaConsumer();
+                Consumer<String, String> kafkaConsumer2 = newKafkaConsumer();
 
-            kafkaConsumer.subscribe(Collections.singletonList(topic));
-            kafkaConsumer2.subscribe(Collections.singletonList(topic));
+                kafkaConsumer.subscribe(Collections.singletonList(topic));
+                kafkaConsumer2.subscribe(Collections.singletonList(topic));
 
-            int counter = 0;
-            while (counter < 2) {
-                ConsumerRecords<String, String> records = kafkaConsumer.poll(Duration.ofMillis(100));
+                int counter = 0;
+                while (counter < 2) {
+                    ConsumerRecords<String, String> records = kafkaConsumer.poll(Duration.ofMillis(100));
 
-                Iterator<ConsumerRecord<String, String>> recordItr = records.iterator();
+                    Iterator<ConsumerRecord<String, String>> recordItr = records.iterator();
 
-                while (recordItr.hasNext()) {
-                    // Mimic a crash by stopping after processing 2 out of 3 messages
-                    if (counter == 2) {
-                        break;
+                    while (recordItr.hasNext()) {
+                        // Mimic a crash by stopping after processing 2 out of 3 messages
+                        if (counter == 2) {
+                            break;
+                        }
+
+                        ConsumerRecord<String, String> record = recordItr.next();
+                        inboxTable.put(record.key(), record.offset());
+
+                        counter++;
                     }
-
-                    ConsumerRecord<String, String> record = recordItr.next();
-                    inboxTable.put(record.key(), record.offset());
-
-                    counter++;
                 }
+
+                // Consumer closes without committing any of the proccessed records
+                kafkaConsumer.close();
+
+                AtomicInteger applyCounter = new AtomicInteger(0);
+                counter = 0;
+
+                while (counter < 3) {
+                    ConsumerRecords<String, String> records = kafkaConsumer2.poll(Duration.ofMillis(100));
+
+                    records.forEach(record -> {
+                        if (inboxTable.get(record.key()) >= record.offset()) {
+                            return;
+                        }
+
+                        inboxTable.put(record.key(), record.offset());
+                        applyCounter.incrementAndGet();
+                    });
+
+                    counter += records.count();
+                }
+
+                assertEquals(1, applyCounter.get());
+
+                kafkaConsumer2.close();
             }
-
-            // Consumer closes without committing any of the proccessed records
-            kafkaConsumer.close();
-
-            AtomicInteger applyCounter = new AtomicInteger(0);
-            counter = 0;
-
-            while (counter < 3) {
-                ConsumerRecords<String, String> records = kafkaConsumer2.poll(Duration.ofMillis(100));
-
-                records.forEach(record -> {
-                    if (inboxTable.get(record.key()) >= record.offset()) {
-                        return;
-                    }
-
-                    inboxTable.put(record.key(), record.offset());
-                    applyCounter.incrementAndGet();
-                });
-
-                counter += records.count();
-            }
-
-            assertEquals(1, applyCounter.get());
-
-            kafkaConsumer2.close();
         }
     }
 
