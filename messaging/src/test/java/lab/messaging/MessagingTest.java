@@ -6,6 +6,7 @@ import java.time.Duration;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Properties;
@@ -17,6 +18,7 @@ import org.apache.kafka.clients.admin.AdminClient;
 import org.apache.kafka.clients.admin.NewTopic;
 import org.apache.kafka.clients.consumer.Consumer;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.clients.producer.KafkaProducer;
@@ -105,12 +107,20 @@ public class MessagingTest {
             int counter = 0;
             while (counter < 2) {
                 ConsumerRecords<String, String> records = kafkaConsumer.poll(Duration.ofMillis(100));
-                
-                records.forEach(record -> {
+
+                Iterator<ConsumerRecord<String, String>> recordItr = records.iterator();
+
+                while (recordItr.hasNext()) {
+                    // Mimic a crash by stopping after processing 2 out of 3 messages
+                    if (counter == 2) {
+                        break;
+                    }
+
+                    ConsumerRecord<String, String> record = recordItr.next();
                     inboxTable.put(record.key(), record.offset());
-                });
-                
-                counter += records.count();
+
+                    counter++;
+                }
             }
 
             // Consumer closes without committing any of the proccessed records
@@ -121,9 +131,9 @@ public class MessagingTest {
 
             while (counter < 3) {
                 ConsumerRecords<String, String> records = kafkaConsumer2.poll(Duration.ofMillis(100));
-                
+
                 records.forEach(record -> {
-                    if (inboxTable.get(record.key()) > record.offset()) {
+                    if (inboxTable.get(record.key()) >= record.offset()) {
                         return;
                     }
 
