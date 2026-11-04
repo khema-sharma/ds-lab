@@ -8,7 +8,7 @@
     <version>1.0-SNAPSHOT</version>
   </parent>
 
-  <groupId>lab.messaging</groupId>
+  <groupId>lab.ds.messaging</groupId>
   <artifactId>messaging</artifactId>
   <version>1.0-SNAPSHOT</version>
 

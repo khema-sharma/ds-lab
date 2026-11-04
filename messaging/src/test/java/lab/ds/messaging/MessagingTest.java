@@ -1,4 +1,4 @@
-package lab.messaging;
+package lab.ds.messaging;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
