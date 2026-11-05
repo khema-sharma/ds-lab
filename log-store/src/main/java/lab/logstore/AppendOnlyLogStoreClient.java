@@ -5,6 +5,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -17,6 +18,11 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable {
+
+    private static final int CIRCUIT_TRIP_THRESHOLD = 3;
+
+    private static final int CIRCUIT_CLOSED_STATE = 0;
+    private static final int CIRCUIT_HALF_OPEN_STATE = 2;
 
     private static final Logger logger = LoggerFactory.getLogger(AppendOnlyLogStoreClient.class);
 
@@ -58,6 +64,24 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
         }
     }
 
+    /**
+     * Puts the key-value pair (record) in the store.
+     * <p>
+     * The client implements Circuit Breaker stability pattern. It opens the circuit
+     * when it fails to get an answer from the downstream store after retrying three
+     * times. It uses an idempotency key to protect the duplicate writes.
+     * <p>
+     * The client does not have an explicit solution in place to protect itself from
+     * getting crushed under load using Bulkheads stability pattern. It somewhat
+     * handles it by using a fixed thread pool, but still a complete solution is not
+     * in place.
+     * 
+     * @param key Key to be used to fetch the data
+     * @param value Value to be saved in the store
+     * 
+     * @throws IOException if any issues in saving the record
+     * @throws StoreBusyException if circuit is currently open
+     */
     @Override
     public void put(String key, String value) throws IOException {
         stopIfCircuitIsOpen();
@@ -65,42 +89,43 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
         CountDownLatch quorumLatch = new CountDownLatch(quorumSize - 1);
         List<Throwable> errors = new ArrayList<>(quorumSize);
 
+        final IdempotencyKey idempotencyKey = new IdempotencyKey(UUID.randomUUID().toString());
+
         quorumNodes.stream().forEach(store -> {
             quorumExecutorService.submit(() -> {
-                try {
-                    store.put(key, value);
+                do {
+                    try {
+                        store.put(idempotencyKey, key, value);
+                        quorumLatch.countDown();
 
-                } catch (IOException e) {
-                    errors.add(e);
+                        return;
 
-                } finally {
-                    quorumLatch.countDown();
-                }
+                    } catch (IOException e) {
+                        if (circuitBreakerCount.get() == CIRCUIT_TRIP_THRESHOLD) {
+                            errors.add(e);
+                            return;
+                        }
+
+                        circuitBreakerCount.incrementAndGet();
+                    }
+                } while (circuitBreakerCount.get() < CIRCUIT_TRIP_THRESHOLD);
             });
         });
 
         try {
-            quorumLatch.await(1, TimeUnit.SECONDS);
+
+            quorumLatch.await(5, TimeUnit.SECONDS);
+
         } catch (InterruptedException e) {
             logger.error("Quorum write latch interrupted!");
         }
 
-        boolean didNotHearFromQuorum = (quorumLatch.getCount() > 0);
-        boolean experiencedErrors = !errors.isEmpty();
-
-        if (didNotHearFromQuorum || experiencedErrors) {
-            tripCircuitOnThresholdBreach();
-
-            if (didNotHearFromQuorum) {
-                throw new StoreOperationTimedOutException();
-            }
-
-            throw new IOException("Error saving data.");
+        if (!errors.isEmpty() && tripCircuit()) {
+            throw new IOException("Error saving record.");
         }
 
-        if (circuitBreakerCount.get() > 0) {
-            logger.info("Resetting circuit to open state ...");
-            circuitBreakerCount.setRelease(0);
+        if (errors.isEmpty()) {
+            resetCircuit();
         }
     }
 
@@ -148,27 +173,36 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
         circuitStateSwitchLatch.get().await(5, TimeUnit.SECONDS);
     }
 
-    private void tripCircuitOnThresholdBreach() {
+    private boolean tripCircuit() {
         synchronized (this) {
-            circuitBreakerCount.incrementAndGet();
-
-            if (circuitBreakerCount.get() == 3) {
-                logger.warn("Tripping circuit and scheduling backend task to reset automatically after 3 seconds.");
-
-                circuitStateSwitchLatch.set(new CountDownLatch(1));
-
-                bgExecutorService.schedule(() -> {
-                    logger.info("Resetting circuit to half-open state ...");
-
-                    circuitBreakerCount.setRelease(2);
-                    circuitStateSwitchLatch.get().countDown();
-                }, 3, TimeUnit.SECONDS);
+            if (circuitBreakerCount.get() < CIRCUIT_TRIP_THRESHOLD) {
+                return false;
             }
+
+            logger.warn("Tripping circuit and scheduling backend task to reset automatically after 3 seconds.");
+
+            circuitStateSwitchLatch.set(new CountDownLatch(1));
+
+            bgExecutorService.schedule(() -> {
+                logger.info("Resetting circuit to half-open state ...");
+
+                circuitBreakerCount.setRelease(CIRCUIT_HALF_OPEN_STATE);
+                circuitStateSwitchLatch.get().countDown();
+            }, 3, TimeUnit.SECONDS);
+
+            return true;
+        }
+    }
+
+    private void resetCircuit() {
+        if (circuitBreakerCount.get() > CIRCUIT_CLOSED_STATE) {
+            logger.info("Resetting circuit to open state ...");
+            circuitBreakerCount.setRelease(CIRCUIT_CLOSED_STATE);
         }
     }
 
     private void stopIfCircuitIsOpen() {
-        if (circuitBreakerCount.get() >= 3) {
+        if (circuitBreakerCount.get() == CIRCUIT_TRIP_THRESHOLD) {
             logger.warn("Open circuit, won't invoke integration endpoint!");
             throw new StoreBusyException();
         }
