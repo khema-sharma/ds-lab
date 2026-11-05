@@ -8,52 +8,99 @@ import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable {
+
+    private static final Logger logger = LoggerFactory.getLogger(AppendOnlyLogStoreClient.class);
 
     private final ArrayList<AppendOnlyLogStore> quorumNodes;
     private final int quorumSize;
 
-    private final ExecutorService quorumService;
+    private final ExecutorService quorumExecutorService;
+    private final ScheduledExecutorService bgExecutorService;
+
+    private final AtomicInteger circuitBreakerCount;
+    private final AtomicReference<CountDownLatch> circuitStateSwitchLatch;
 
     public AppendOnlyLogStoreClient(int qSize) throws StoreInitializationException, IOException {
-        if (qSize <= 0) {
-            throw new IllegalArgumentException("Quorum size must be atleast 1.");
+        this(qSize, null);
+    }
+
+    AppendOnlyLogStoreClient(AppendOnlyLogStore[] quorum) throws StoreInitializationException, IOException {
+        this(-1, quorum);
+    }
+
+    private AppendOnlyLogStoreClient(int capacity, AppendOnlyLogStore[] quorum) throws StoreInitializationException {
+        int qSize = (quorum != null ? quorum.length : capacity);
+
+        if (qSize <= 2) {
+            throw new IllegalArgumentException("Quorum size must be atleast 3.");
         }
 
         quorumSize = qSize;
-        quorumNodes = new ArrayList<>(qSize);
+        quorumNodes = new ArrayList<>(quorumSize);
 
-        quorumService = Executors.newFixedThreadPool(5);
+        quorumExecutorService = Executors.newFixedThreadPool(5);
+        bgExecutorService = Executors.newScheduledThreadPool(1);
 
-        initQuorumNodes();
+        circuitBreakerCount = new AtomicInteger(0);
+        circuitStateSwitchLatch = new AtomicReference<>(new CountDownLatch(0));
+
+        for (int i = 0; i < quorumSize; i++) {
+            quorumNodes.add(quorum == null ? new AppendOnlyLogStore() : quorum[i]);
+        }
     }
 
     @Override
     public void put(String key, String value) throws IOException {
+        stopIfCircuitIsOpen();
+
         CountDownLatch quorumLatch = new CountDownLatch(quorumSize - 1);
+        List<Throwable> errors = new ArrayList<>(quorumSize);
 
         quorumNodes.stream().forEach(store -> {
-            quorumService.submit(() -> {
+            quorumExecutorService.submit(() -> {
                 try {
                     store.put(key, value);
-                    quorumLatch.countDown();
 
                 } catch (IOException e) {
-                    System.err.println("An error occurred while saving data: " + e.getMessage());
+                    errors.add(e);
+
+                } finally {
+                    quorumLatch.countDown();
                 }
             });
         });
 
         try {
-            quorumLatch.await(5, TimeUnit.SECONDS);
+            quorumLatch.await(1, TimeUnit.SECONDS);
         } catch (InterruptedException e) {
-            System.err.println("Quorum write latch interrupted.");
+            logger.error("Quorum write latch interrupted!");
         }
 
-        if (quorumLatch.getCount() > 0) {
+        boolean didNotHearFromQuorum = (quorumLatch.getCount() > 0);
+        boolean experiencedErrors = !errors.isEmpty();
+
+        if (didNotHearFromQuorum || experiencedErrors) {
+            tripCircuitOnThresholdBreach();
+
+            if (didNotHearFromQuorum) {
+                throw new StoreOperationTimedOutException();
+            }
+
             throw new IOException("Error saving data.");
+        }
+
+        if (circuitBreakerCount.get() > 0) {
+            logger.info("Resetting circuit to open state ...");
+            circuitBreakerCount.setRelease(0);
         }
     }
 
@@ -63,7 +110,7 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
         CountDownLatch quorumLatch = new CountDownLatch(quorumSize - 1);
 
         quorumNodes.stream().forEach(store -> {
-            quorumService.submit(() -> {
+            quorumExecutorService.submit(() -> {
                 try {
                     valueVersions.add(store.get(key));
                     quorumLatch.countDown();
@@ -97,9 +144,33 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
         });
     }
 
-    private void initQuorumNodes() throws StoreInitializationException, IOException {
-        for (int i = 0; i < quorumSize; i++) {
-            quorumNodes.add(new AppendOnlyLogStore());
+    void internalBlockUntilCircuitIsOpen() throws InterruptedException {
+        circuitStateSwitchLatch.get().await(5, TimeUnit.SECONDS);
+    }
+
+    private void tripCircuitOnThresholdBreach() {
+        synchronized (this) {
+            circuitBreakerCount.incrementAndGet();
+
+            if (circuitBreakerCount.get() == 3) {
+                logger.warn("Tripping circuit and scheduling backend task to reset automatically after 3 seconds.");
+
+                circuitStateSwitchLatch.set(new CountDownLatch(1));
+
+                bgExecutorService.schedule(() -> {
+                    logger.info("Resetting circuit to half-open state ...");
+
+                    circuitBreakerCount.setRelease(2);
+                    circuitStateSwitchLatch.get().countDown();
+                }, 3, TimeUnit.SECONDS);
+            }
+        }
+    }
+
+    private void stopIfCircuitIsOpen() {
+        if (circuitBreakerCount.get() >= 3) {
+            logger.warn("Open circuit, won't invoke integration endpoint!");
+            throw new StoreBusyException();
         }
     }
 
