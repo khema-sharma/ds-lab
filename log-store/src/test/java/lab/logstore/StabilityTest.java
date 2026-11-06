@@ -17,6 +17,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import lab.logstore.core.IdempotencyKey;
+
 @ExtendWith(MockitoExtension.class)
 public class StabilityTest {
 

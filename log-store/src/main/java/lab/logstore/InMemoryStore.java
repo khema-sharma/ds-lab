@@ -4,7 +4,15 @@ import java.io.IOException;
 import java.util.HashMap;
 import java.util.Map;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import lab.logstore.core.AbstractStore;
+import lab.logstore.core.OperationBenchmark;
+
 public class InMemoryStore extends AbstractStore {
+
+    private static final Logger logger = LoggerFactory.getLogger(InMemoryStore.class);
 
     public static final String ERR_ILLEGAL_KEY = "Key cannot be blank.";
 
@@ -44,11 +52,11 @@ public class InMemoryStore extends AbstractStore {
         try {
             OperationBenchmark[] benchMarks = new InMemoryStore().benchmarkOperations();
 
-            System.out.println("Write benchmarks: " + benchMarks[0]);
-            System.out.println("Read benchmarks: " + benchMarks[1]);
+            logger.info("Write benchmarks: " + benchMarks[0]);
+            logger.info("Read benchmarks: " + benchMarks[1]);
 
         } catch (IOException e) {
-            e.printStackTrace();
+            logger.error(e.getMessage(), e);
         }
     }
 

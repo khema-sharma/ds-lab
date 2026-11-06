@@ -1,4 +1,4 @@
-package lab.logstore;
+package lab.logstore.core;
 
 import java.io.IOException;
 import java.util.Arrays;

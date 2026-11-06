@@ -9,6 +9,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import org.junit.jupiter.api.Test;
 
+import lab.logstore.core.LogStoreInsertEvent;
+
 public class OutboxServiceTest {
 
     @Test

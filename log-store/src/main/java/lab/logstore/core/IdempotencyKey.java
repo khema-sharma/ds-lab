@@ -1,4 +1,4 @@
-package lab.logstore;
+package lab.logstore.core;
 
 public record IdempotencyKey(String key) {
     public IdempotencyKey {

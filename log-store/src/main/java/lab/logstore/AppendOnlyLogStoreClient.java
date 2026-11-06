@@ -17,6 +17,8 @@ import java.util.concurrent.atomic.AtomicReference;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import lab.logstore.core.IdempotencyKey;
+
 public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable {
 
     private static final int CIRCUIT_TRIP_THRESHOLD = 3;
@@ -117,7 +119,7 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
             quorumLatch.await(5, TimeUnit.SECONDS);
 
         } catch (InterruptedException e) {
-            logger.error("Quorum write latch interrupted!");
+            logger.error("Quorum write latch interrupted!", e);
         }
 
         if (!errors.isEmpty() && tripCircuit()) {
@@ -140,7 +142,7 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
                     valueVersions.add(store.get(key));
                     quorumLatch.countDown();
                 } catch (IOException e) {
-                    System.err.println("An error occurred while retrieving data: " + e.getMessage());
+                    logger.error("An error occurred while retrieving data: " + e.getMessage(), e);
                 }
             });
         });
@@ -148,7 +150,7 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
         try {
             quorumLatch.await(5, TimeUnit.SECONDS);
         } catch (InterruptedException e) {
-            System.err.println("Quorum read latch interrupted.");
+            logger.error("Quorum read latch interrupted.", e);
         }
 
         if (quorumLatch.getCount() > 0) {
@@ -164,7 +166,7 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
             try {
                 store.close();
             } catch (IOException e) {
-                System.err.println("An error occurred while closing the store: " + e.getMessage());
+                logger.error("An error occurred while closing the store: " + e.getMessage(), e);
             }
         });
     }

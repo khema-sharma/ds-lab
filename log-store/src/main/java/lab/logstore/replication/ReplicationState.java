@@ -1,4 +1,4 @@
-package lab.logstore;
+package lab.logstore.replication;
 
 import java.util.concurrent.atomic.AtomicInteger;
 

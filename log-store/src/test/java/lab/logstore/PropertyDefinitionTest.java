@@ -6,6 +6,9 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import org.junit.jupiter.api.Test;
 
+import lab.ds.core.Property;
+import lab.ds.core.PropertyDefinition;
+
 public class PropertyDefinitionTest {
     private final String scalabilityMetric = "99th percentile time for a get, at 100 requests per second.";
     private final String scalabilityUnit = "milliseconds";

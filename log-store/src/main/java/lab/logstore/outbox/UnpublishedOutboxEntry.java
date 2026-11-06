@@ -1,4 +1,4 @@
-package lab.logstore;
+package lab.logstore.outbox;
 
 import java.io.DataInput;
 import java.io.IOException;

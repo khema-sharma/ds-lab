@@ -2,6 +2,8 @@ package lab.logstore;
 
 import java.io.IOException;
 
+import lab.logstore.core.Store;
+
 /**
  * LogStoreClient transparently connects to a {@link Store} and performs
  * reliable {@code put} and {@code get} operations.

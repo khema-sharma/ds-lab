@@ -1,4 +1,4 @@
-package lab.logstore;
+package lab.ds.core;
 
 public record PropertyDefinition(Property property, String metric,
     String unit, String target, String failure) {

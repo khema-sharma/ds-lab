@@ -1,4 +1,4 @@
-package lab.logstore;
+package lab.ds.core;
 
 import java.util.LinkedList;
 import java.util.List;

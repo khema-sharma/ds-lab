@@ -7,7 +7,12 @@ import java.util.LinkedList;
 import java.util.List;
 import java.util.Optional;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 public class LogStoreInput extends RandomLogStoreAccess {
+
+    private static final Logger logger = LoggerFactory.getLogger(LogStoreInput.class);
 
     private final Object readMonitor;
 
@@ -65,7 +70,7 @@ public class LogStoreInput extends RandomLogStoreAccess {
                     }
                 }
             } catch (IOException e) {
-                System.err.println("Error reading an entry at offset: " + previousPos);
+                logger.error("Error reading an entry at offset: " + previousPos);
                 break;
             }
         }
@@ -114,7 +119,7 @@ public class LogStoreInput extends RandomLogStoreAccess {
                 };
 
             } catch (IllegalStateException ise) {
-                System.err.println("An error occurred while reading record entry: " + ise.getMessage());
+                logger.error("An error occurred while reading record entry: " + ise.getMessage(), ise);
             }
 
             return Optional.empty();

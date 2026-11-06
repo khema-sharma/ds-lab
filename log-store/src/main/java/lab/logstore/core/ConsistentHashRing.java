@@ -1,4 +1,4 @@
-package lab.logstore;
+package lab.logstore.core;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -7,7 +7,12 @@ import java.util.HexFormat;
 import java.util.Map;
 import java.util.TreeMap;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 public final class ConsistentHashRing {
+
+    private static final Logger logger = LoggerFactory.getLogger(ConsistentHashRing.class);
 
     private final int virtualNodesPerNode;
     private final TreeMap<String, String> ring;
@@ -57,7 +62,7 @@ public final class ConsistentHashRing {
 
             return md5Hash;
         } catch (NoSuchAlgorithmException e) {
-            e.printStackTrace();
+            logger.error(e.getMessage(), e);
         }
 
         return value;

@@ -12,8 +12,13 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 import org.junit.jupiter.api.Test;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public class InMemoryStoreTest {
+
+    private static final Logger logger = LoggerFactory.getLogger(InMemoryStoreTest.class);
+
     @Test
     public void rejectAppendWithBlankKey() {
         IllegalArgumentException exp = assertThrows(IllegalArgumentException.class,
@@ -42,7 +47,7 @@ public class InMemoryStoreTest {
                 Thread.sleep(2);
                 store.put("key-1", "value-2");
             } catch (IOException | InterruptedException e) {
-                e.printStackTrace();
+                logger.error(e.getMessage(), e);
             }
         });
 
@@ -58,7 +63,7 @@ public class InMemoryStoreTest {
 
                 } while (value != null && !value.equals("value-2"));
             } catch (IOException e) {
-                e.printStackTrace();
+                logger.error(e.getMessage(), e);
             }
         }).get();
 

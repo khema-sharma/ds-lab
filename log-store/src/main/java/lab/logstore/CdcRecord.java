@@ -8,6 +8,9 @@ import java.io.ObjectOutputStream;
 import java.nio.ByteBuffer;
 import java.util.Optional;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 /**
  * 
  * Represents a Change Data Capture (CDC) record.
@@ -24,6 +27,8 @@ public record CdcRecord(byte type, long timestamp, Object event) implements LogS
     public static final byte TYPE_INSERT = 1;
     public static final byte TYPE_UPDATE = 2;
     public static final byte TYPE_DELETE = 3;
+
+    private static final Logger logger = LoggerFactory.getLogger(CdcRecord.class);
 
     public static Optional<CdcRecord> createFromPayload(byte[] recordPayload) {
         if (recordPayload == null || recordPayload.length == 0) {
@@ -58,7 +63,7 @@ public record CdcRecord(byte type, long timestamp, Object event) implements LogS
             return Optional.of(new CdcRecord(type, timestamp, event));
 
         } catch (Exception e) {
-            System.err.println("Error while deserializing CDC record: " + e.getMessage());
+            logger.error("Error while deserializing CDC record: " + e.getMessage(), e);
         }
 
         return Optional.empty();

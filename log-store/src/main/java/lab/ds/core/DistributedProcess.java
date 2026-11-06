@@ -1,4 +1,5 @@
-package lab.logstore;
+package lab.ds.core;
+
 /**
  * Mimics a process/server running on some node in a distributed system.
  * <p>

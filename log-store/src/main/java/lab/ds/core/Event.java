@@ -1,4 +1,4 @@
-package lab.logstore;
+package lab.ds.core;
 
 public record Event(int eventId, String nodeId) {
 

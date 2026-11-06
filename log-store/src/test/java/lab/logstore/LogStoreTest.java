@@ -15,8 +15,15 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import org.junit.jupiter.api.Test;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import lab.logstore.core.ConsistentHashRing;
+import lab.logstore.core.IdempotencyKey;
 
 public class LogStoreTest {
+
+    private static Logger logger = LoggerFactory.getLogger(LogStoreTest.class);
 
     @Test
     public void acceptsValidWrites() throws StoreInitializationException, IOException {
@@ -319,18 +326,18 @@ public class LogStoreTest {
                     }
 
                     int itemsCount = Integer.valueOf(store.get("itemsCount"));
-                    System.out.println("Read value");
+                    logger.info("Read value");
 
                     Thread.sleep(10);
 
                     store.put("itemsCount", Integer.toString(--itemsCount));
-                    System.out.println("Updated value");
+                    logger.info("Updated value");
 
                     if (lockKey) {
                         store.unlockKey("itemsCount");
                     }
                 } catch (Exception e) {
-                    System.err.println("Error while decrementing count: " + e.getMessage());
+                    logger.error("Error while decrementing count: " + e.getMessage(), e);
                 }
             }
         };

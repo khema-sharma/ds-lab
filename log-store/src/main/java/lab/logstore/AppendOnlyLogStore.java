@@ -4,17 +4,8 @@ import java.io.Closeable;
 import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.IOException;
-import java.io.OutputStream;
-import java.io.RandomAccessFile;
-import java.nio.ByteBuffer;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
-import java.nio.file.StandardCopyOption;
-import java.nio.file.StandardOpenOption;
 import java.text.MessageFormat;
 import java.util.LinkedHashMap;
-import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -22,11 +13,21 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Function;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import lab.logstore.core.AbstractStore;
+import lab.logstore.core.IdempotencyKey;
+import lab.logstore.core.LogStoreEvent;
+import lab.logstore.core.LogStoreInsertEvent;
+import lab.logstore.core.OperationBenchmark;
+import lab.logstore.outbox.OutboxStore;
+import lab.logstore.replication.ReplicationState;
 
 /**
  * AppendOnlyLogStore is a simple {@code(key, value)} store backed up by a
@@ -50,6 +51,8 @@ import java.util.function.Function;
  * </ul>
  */
 public class AppendOnlyLogStore extends AbstractStore implements Closeable {
+
+    private static final Logger logger = LoggerFactory.getLogger(AppendOnlyLogStore.class);
 
     private static final String ERR_IN_INIT = "An error occurred while initializing store: {0}";
 
@@ -116,7 +119,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
         lastOffset = 0;
         buildIndexes();
 
-        System.out.println("Created store at: " + store.getAbsolutePath());
+        logger.info("Created store at: " + store.getAbsolutePath());
     }
 
     @Override
@@ -258,8 +261,8 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
         int latestTerm = ReplicationState.getCurrentTerm();
 
         if (latestTerm > leaderTerm) {
-            System.err.println("Current term, " + latestTerm + " greater than the received term " + leaderTerm);
-            System.err.println("Rejecting the replication request.");
+            logger.error("Current term, " + latestTerm + " greater than the received term " + leaderTerm);
+            logger.error("Rejecting the replication request.");
 
             return;
         }
@@ -296,10 +299,9 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
         int activeReplTerm = ReplicationState.getCurrentTerm();
 
         if (replicationTerm < activeReplTerm) {
-            System.err
-                    .println(MessageFormat.format("Active replication term, {0}, is ahead of my replication term, {1}.",
+            logger.error(MessageFormat.format("Active replication term, {0}, is ahead of my replication term, {1}.",
                             activeReplTerm, replicationTerm));
-            System.err.println("Cannot process write request!");
+            logger.error("Cannot process write request!");
 
             throw new IllegalStateException();
         }
@@ -349,7 +351,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
             storeWriter = new StoreWriter();
             storeReader = new StoreReader();
 
-            outboxStore = new OutboxStore(store);
+            outboxStore = new OutboxStore(storeReader, store);
 
         } catch (IOException fne) {
             throw new StoreInitializationException(fne);
@@ -373,7 +375,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
                         indexes.put(((DataEntry) entrySet.entry()).record().key(), lastOffset);
                     });
         } catch (IOException e) {
-            System.err.println("Error whilst indexing: " + e.getMessage());
+            logger.error("Error whilst indexing: " + e.getMessage());
         }
     }
 
@@ -460,7 +462,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
 
     }
 
-    private class StoreWriter implements Closeable {
+    public class StoreWriter implements Closeable {
 
         private final LogStoreOuput storeOutput;
 
@@ -502,183 +504,14 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
 
     }
 
-    private final class OutboxStore implements Closeable {
-
-        private final Path outboxPath;
-        private final Path tmpOutboxPath;
-
-        private final List<Function<LogStoreEvent, Void>> outboxListeners;
-
-        private volatile List<UnpublishedOutboxEntry> unpublishedEntries;
-
-        private final Object stateMonitor;
-        private final ScheduledExecutorService backupExecutorService;
-
-        public OutboxStore(File logStore) throws IOException {
-            if (logStore == null || !logStore.isFile()) {
-                throw new IllegalArgumentException("Invalid store file. outboxStore must be a file.");
-            }
-
-            String logStoreName = logStore.getName();
-
-            logStoreName = logStoreName.replace("wal-", "");
-            logStoreName = logStoreName.replace(".db", "");
-
-            String outboxFileName = "outbox-" + logStoreName;
-
-            outboxPath = Paths.get(logStore.getParent(), outboxFileName + ".bin");
-            tmpOutboxPath = Paths.get(logStore.getParent(), outboxFileName + ".tmp");
-
-            unpublishedEntries = new LinkedList<>();
-            outboxListeners = new LinkedList<>();
-
-            stateMonitor = new Object();
-
-            backupExecutorService = Executors.newScheduledThreadPool(1);
-            backupExecutorService.scheduleWithFixedDelay(new OutboxBackupThread(), 0, 3, TimeUnit.SECONDS);
-
-            loadState();
-        }
-
-        @Override
-        public void close() throws IOException {
-            backupExecutorService.shutdownNow();
-            saveUnpublishedOutbox();
-        }
-
-        public void recordInserted(LogStoreEntrySet cdcRecordSet) {
-            synchronized (stateMonitor) {
-                unpublishedEntries
-                        .add(new UnpublishedOutboxEntry(((CdcEntry) cdcRecordSet.entry()).record().timestamp(),
-                                cdcRecordSet.offset()));
-            }
-        }
-
-        public void registerListener(Function<LogStoreEvent, Void> listener) {
-            if (listener == null) {
-                throw new IllegalArgumentException("listener cannot be null.");
-            }
-
-            outboxListeners.add(listener);
-        }
-
-        public void publishEvents() {
-            synchronized (stateMonitor) {
-                notifyListeners();
-            }
-        }
-
-        private void loadState() throws IOException {
-            if (!Files.exists(outboxPath) || Files.size(outboxPath) == 0) {
-                return;
-            }
-
-            try (RandomAccessFile outbox = new RandomAccessFile(outboxPath.toFile(), "r")) {
-                int size = outbox.readInt();
-
-                if (size <= 0) {
-                    return;
-                }
-
-                List<UnpublishedOutboxEntry> entries = new LinkedList<>();
-                for (int i = 0; i < size; i++) {
-                    entries.add(UnpublishedOutboxEntry.createFromInput(outbox));
-                }
-
-                synchronized (stateMonitor) {
-                    unpublishedEntries = entries;
-                }
-            }
-        }
-
-        private void notifyListeners() {
-            unpublishedEntries
-                    .stream()
-                    .forEach(entry -> {
-                        outboxListeners.forEach(listener -> {
-                            long eventId = entry.id();
-                            long offset = entry.offset();
-
-                            Optional<CdcRecord> cdcRecord = Optional.empty();
-
-                            try {
-                                cdcRecord = storeReader.readCdcRecordAt(offset);
-                            } catch (IOException e) {
-                                System.err.println("Error while fetching CDC entry for log at offset " +
-                                        offset + ": "
-                                        + e.getMessage());
-                            }
-
-                            if (cdcRecord.isPresent() && cdcRecord.get().timestamp() == eventId) {
-                                try {
-                                    listener.apply((LogStoreEvent) cdcRecord.get().event());
-                                } catch (Exception e) {
-                                    System.err
-                                            .println("Ignoring the error that occurred whilst calling outbox listener: "
-                                                    + e.getMessage());
-                                }
-                            }
-                        });
-                    });
-            unpublishedEntries.clear();
-        }
-
-        private void saveUnpublishedOutbox() {
-            synchronized (stateMonitor) {
-                try (OutputStream stream = Files.newOutputStream(tmpOutboxPath, StandardOpenOption.CREATE,
-                        StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING)) {
-
-                    if (!unpublishedEntries.isEmpty()) {
-                        int totalBytes = Integer.BYTES
-                                + (unpublishedEntries.size() * (UnpublishedOutboxEntry.BYTES));
-
-                        ByteBuffer outboxBuffer = ByteBuffer.allocate(totalBytes);
-
-                        outboxBuffer.putInt(unpublishedEntries.size());
-
-                        unpublishedEntries.forEach(entry -> entry.writeEntry(outboxBuffer));
-
-                        stream.write(outboxBuffer.array());
-                        stream.flush();
-                    }
-
-                } catch (IOException e) {
-                    System.err.println("An error occurred whilst save temporary outbox: " + e.getMessage());
-                }
-
-                try {
-                    Files.move(tmpOutboxPath, outboxPath, StandardCopyOption.ATOMIC_MOVE,
-                            StandardCopyOption.REPLACE_EXISTING);
-                } catch (IOException e) {
-                    System.err.println("An error occurred whilst saving outbox: " + e.getMessage());
-                }
-            }
-        }
-
-        private class OutboxBackupThread extends Thread {
-
-            private OutboxBackupThread() {
-                super();
-                setDaemon(true);
-            }
-
-            @Override
-            public void run() {
-                saveUnpublishedOutbox();
-            }
-
-        }
-
-    }
-
     public static void main(String[] args) {
         try (AppendOnlyLogStore store = new AppendOnlyLogStore()) {
             OperationBenchmark[] benchMarks = store.benchmarkOperations();
 
-            System.out.println("Write benchmarks: " + benchMarks[0]);
-            System.out.println("Read benchmarks: " + benchMarks[1]);
+            logger.info("Write benchmarks: " + benchMarks[0]);
+            logger.info("Read benchmarks: " + benchMarks[1]);
         } catch (StoreInitializationException | IOException e) {
-            e.printStackTrace();
+            logger.error(e.getMessage());
         }
     }
 
