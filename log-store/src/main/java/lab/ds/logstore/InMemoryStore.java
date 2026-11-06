@@ -1,0 +1,63 @@
+package lab.ds.logstore;
+
+import java.io.IOException;
+import java.util.HashMap;
+import java.util.Map;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import lab.ds.logstore.core.AbstractStore;
+import lab.ds.logstore.core.OperationBenchmark;
+
+public class InMemoryStore extends AbstractStore {
+
+    private static final Logger logger = LoggerFactory.getLogger(InMemoryStore.class);
+
+    public static final String ERR_ILLEGAL_KEY = "Key cannot be blank.";
+
+    private Map<String, String> store = new HashMap<>();
+
+    // Ensures read operation sees last complete write operation through monitor
+    // lock guarantee.
+    //
+    // It ensures that a read operation waiting on a lock acquired by write
+    // operation will see the latest value written by the write operation
+    // when it releases the lock.
+    private final Object readWriteMonitor = new Object();
+
+    public void put(String key, String value) throws IOException {
+        if (key == null || key.isBlank()) {
+            throw new IllegalArgumentException(ERR_ILLEGAL_KEY);
+        }
+
+        synchronized (readWriteMonitor) {
+            store.put(key, value);
+        }
+    }
+
+    @Override
+    public String get(String key) throws IOException {
+        synchronized (readWriteMonitor) {
+            return store.get(key);
+        }
+    }
+
+    @Override
+    public void clear() throws IOException {
+        store.clear();
+    }
+
+    public static void main(String[] args) {
+        try {
+            OperationBenchmark[] benchMarks = new InMemoryStore().benchmarkOperations();
+
+            logger.info("Write benchmarks: " + benchMarks[0]);
+            logger.info("Read benchmarks: " + benchMarks[1]);
+
+        } catch (IOException e) {
+            logger.error(e.getMessage(), e);
+        }
+    }
+
+}
