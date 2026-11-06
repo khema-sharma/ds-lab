@@ -48,6 +48,7 @@ public class StabilityTest {
 
             doThrow(IOException.class)
                     .doThrow(IOException.class)
+                    .doThrow(IOException.class)
                     // Trips the circuit
                     .doThrow(IOException.class)
                     // Called after wait, trips back from half-open state

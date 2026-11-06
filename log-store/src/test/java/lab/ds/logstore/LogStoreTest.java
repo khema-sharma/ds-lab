@@ -328,7 +328,7 @@ public class LogStoreTest {
                     int itemsCount = Integer.valueOf(store.get("itemsCount"));
                     logger.info("Read value");
 
-                    Thread.sleep(10);
+                    Thread.sleep(100);
 
                     store.put("itemsCount", Integer.toString(--itemsCount));
                     logger.info("Updated value");

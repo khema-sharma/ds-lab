@@ -5,7 +5,9 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -21,6 +23,7 @@ import lab.ds.logstore.core.IdempotencyKey;
 
 public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable {
 
+    private static final int MAX_RETRIES = 3;
     private static final int CIRCUIT_TRIP_THRESHOLD = 3;
 
     private static final int CIRCUIT_CLOSED_STATE = 0;
@@ -34,8 +37,8 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
     private final ExecutorService quorumExecutorService;
     private final ScheduledExecutorService bgExecutorService;
 
-    private final AtomicInteger circuitBreakerCount;
-    private final AtomicReference<CountDownLatch> circuitStateSwitchLatch;
+    private final Map<AppendOnlyLogStore, AtomicInteger> circuitBreakerCount;
+    private final Map<AppendOnlyLogStore, AtomicReference<CountDownLatch>> circuitStateSwitchLatch;
 
     public AppendOnlyLogStoreClient(int qSize) throws StoreInitializationException, IOException {
         this(qSize, null);
@@ -58,11 +61,16 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
         quorumExecutorService = Executors.newFixedThreadPool(5);
         bgExecutorService = Executors.newScheduledThreadPool(1);
 
-        circuitBreakerCount = new AtomicInteger(0);
-        circuitStateSwitchLatch = new AtomicReference<>(new CountDownLatch(0));
+        circuitBreakerCount = new ConcurrentHashMap<>();
+        circuitStateSwitchLatch = new ConcurrentHashMap<>();
 
         for (int i = 0; i < quorumSize; i++) {
-            quorumNodes.add(quorum == null ? new AppendOnlyLogStore() : quorum[i]);
+            AppendOnlyLogStore node = (quorum == null ? new AppendOnlyLogStore() : quorum[i]);
+
+            quorumNodes.add(node);
+
+            circuitBreakerCount.put(node, new AtomicInteger(CIRCUIT_CLOSED_STATE));
+            circuitStateSwitchLatch.put(node, new AtomicReference<>(new CountDownLatch(0)));
         }
     }
 
@@ -78,56 +86,69 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
      * handles it by using a fixed thread pool, but still a complete solution is not
      * in place.
      * 
-     * @param key Key to be used to fetch the data
+     * @param key   Key to be used to fetch the data
      * @param value Value to be saved in the store
      * 
-     * @throws IOException if any issues in saving the record
+     * @throws IOException        if any issues in saving the record
      * @throws StoreBusyException if circuit is currently open
      */
     @Override
     public void put(String key, String value) throws IOException {
-        stopIfCircuitIsOpen();
-
-        CountDownLatch quorumLatch = new CountDownLatch(quorumSize - 1);
-        List<Throwable> errors = new ArrayList<>(quorumSize);
+        CountDownLatch quorumLatch = new CountDownLatch(quorumSize);
 
         final IdempotencyKey idempotencyKey = new IdempotencyKey(UUID.randomUUID().toString());
 
+        final AtomicInteger numberOfNodesVisited = new AtomicInteger();
+        final AtomicInteger successfulSaves = new AtomicInteger();
+
         quorumNodes.stream().forEach(store -> {
             quorumExecutorService.submit(() -> {
-                do {
-                    try {
-                        store.put(idempotencyKey, key, value);
-                        quorumLatch.countDown();
-
+                try {
+                    if (circuitOpen(store)) {
                         return;
-
-                    } catch (IOException e) {
-                        if (circuitBreakerCount.get() == CIRCUIT_TRIP_THRESHOLD) {
-                            errors.add(e);
-                            return;
-                        }
-
-                        circuitBreakerCount.incrementAndGet();
                     }
-                } while (circuitBreakerCount.get() < CIRCUIT_TRIP_THRESHOLD);
+
+                    numberOfNodesVisited.incrementAndGet();
+
+                    int callCount = 0;
+                    int maxRetries = (circuitHalfOpen(store) ? 1 : MAX_RETRIES);
+
+                    do {
+                        try {
+                            store.put(idempotencyKey, key, value);
+
+                            closeCicuit(store);
+                            successfulSaves.incrementAndGet();
+
+                            break;
+
+                        } catch (IOException e) {
+                            callCount++;
+                            circuitBreakerCount.get(store).incrementAndGet();
+                        }
+                    } while (callCount < maxRetries);
+                } finally {
+                    quorumLatch.countDown();
+                }
             });
         });
 
         try {
-
             quorumLatch.await(5, TimeUnit.SECONDS);
-
         } catch (InterruptedException e) {
             logger.error("Quorum write latch interrupted!", e);
         }
 
-        if (!errors.isEmpty() && tripCircuit()) {
-            throw new IOException("Error saving record.");
+        if (numberOfNodesVisited.get() < (quorumSize - 1)) {
+            logger.warn("Circuits open, connection not allowed.");
+            throw new StoreBusyException();
         }
 
-        if (errors.isEmpty()) {
-            resetCircuit();
+        if (successfulSaves.get() < (quorumSize - 1)) {
+            logger.error("Could not write record to the quorum.");
+
+            scheduleResets();
+            throw new IOException("Error saving record.");
         }
     }
 
@@ -172,41 +193,45 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
     }
 
     void internalBlockUntilCircuitIsOpen() throws InterruptedException {
-        circuitStateSwitchLatch.get().await(5, TimeUnit.SECONDS);
+        logger.info("Waiting for state latches to open ...");
+
+        for (AppendOnlyLogStore node : quorumNodes) {
+            circuitStateSwitchLatch.get(node).get().await(5, TimeUnit.SECONDS);
+        }
     }
 
-    private boolean tripCircuit() {
+    private boolean circuitOpen(AppendOnlyLogStore node) {
+        AtomicInteger counter = circuitBreakerCount.get(node);
+        return (counter != null && counter.get() == CIRCUIT_TRIP_THRESHOLD);
+    }
+
+    private boolean circuitHalfOpen(AppendOnlyLogStore node) {
+        AtomicInteger counter = circuitBreakerCount.get(node);
+        return (counter != null && counter.get() == CIRCUIT_HALF_OPEN_STATE);
+    }
+
+    private void closeCicuit(AppendOnlyLogStore store) {
+        circuitBreakerCount.get(store).set(CIRCUIT_CLOSED_STATE);
+    }
+
+    private void scheduleResets() {
         synchronized (this) {
-            if (circuitBreakerCount.get() < CIRCUIT_TRIP_THRESHOLD) {
-                return false;
+            for (AppendOnlyLogStore node : quorumNodes) {
+                if (!circuitOpen(node)) {
+                    continue;
+                }
+
+                logger.warn("Scheduling reset after 3 seconds for the given node.");
+
+                circuitStateSwitchLatch.get(node).set(new CountDownLatch(1));
+
+                bgExecutorService.schedule(() -> {
+                    logger.info("Resetting circuit to half-open state ...");
+
+                    circuitBreakerCount.get(node).setRelease(CIRCUIT_HALF_OPEN_STATE);
+                    circuitStateSwitchLatch.get(node).get().countDown();
+                }, 3, TimeUnit.SECONDS);
             }
-
-            logger.warn("Tripping circuit and scheduling backend task to reset automatically after 3 seconds.");
-
-            circuitStateSwitchLatch.set(new CountDownLatch(1));
-
-            bgExecutorService.schedule(() -> {
-                logger.info("Resetting circuit to half-open state ...");
-
-                circuitBreakerCount.setRelease(CIRCUIT_HALF_OPEN_STATE);
-                circuitStateSwitchLatch.get().countDown();
-            }, 3, TimeUnit.SECONDS);
-
-            return true;
-        }
-    }
-
-    private void resetCircuit() {
-        if (circuitBreakerCount.get() > CIRCUIT_CLOSED_STATE) {
-            logger.info("Resetting circuit to open state ...");
-            circuitBreakerCount.setRelease(CIRCUIT_CLOSED_STATE);
-        }
-    }
-
-    private void stopIfCircuitIsOpen() {
-        if (circuitBreakerCount.get() == CIRCUIT_TRIP_THRESHOLD) {
-            logger.warn("Open circuit, won't invoke integration endpoint!");
-            throw new StoreBusyException();
         }
     }
 
