@@ -2,6 +2,7 @@ package lab.ds.logstore;
 
 import java.io.IOException;
 
+import lab.ds.logstore.core.IdempotencyKey;
 import lab.ds.logstore.core.Store;
 
 /**
@@ -16,6 +17,15 @@ public interface LogStoreClient {
      * @param value
      */
     public void put(String key, String value) throws IOException;
+
+    /**
+     * 
+     * @param idempotencyKey
+     * @param key
+     * @param value
+     * @throws IOException
+     */
+    public void put(IdempotencyKey idempotencyKey, String key, String value) throws IOException;
 
     /**
      * 
