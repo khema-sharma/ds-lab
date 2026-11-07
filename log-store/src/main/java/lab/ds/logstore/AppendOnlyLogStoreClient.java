@@ -2,6 +2,7 @@ package lab.ds.logstore;
 
 import java.io.Closeable;
 import java.io.IOException;
+import java.sql.Time;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -91,9 +92,6 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
 
         ExecutorCompletionService<Boolean> opCompletionService = new ExecutorCompletionService<>(quorumExecutorService);
 
-        int successCount = 0;
-        int failureCount = 0;
-
         nodes.forEach(decoratedNode -> opCompletionService.submit(() -> {
             try {
                 decoratedNode.put(idempotencyKey, key, value);
@@ -104,24 +102,33 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
             }
         }));
 
-        long timeout = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
 
         try {
+            int successCount = 0;
+            int failureCount = 0;
+
             while (successCount < quorumSize && (poolSize - failureCount) >= quorumSize) {
-                if (succeededOperation(opCompletionService.poll(timeout, TimeUnit.NANOSECONDS))) {
+                Future<Boolean> futureOp = opCompletionService.poll(deadline - System.nanoTime(), TimeUnit.NANOSECONDS);
+
+                if (futureOp == null) {
+                    throw new OperationStateUnknownException(idempotencyKey);
+                }
+
+                if (succeededOperation(futureOp)) {
                     successCount++;
                 } else {
                     failureCount++;
                 }
             }
+
+            if (successCount < quorumSize) {
+                logger.error("The put operation failed, did not get confirmation from the quorum");
+                throw new IOException("Failed to save record");
+            }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new OperationStateUnknownException(idempotencyKey);
-        }
-
-        if (successCount < quorumSize) {
-            logger.error("The put operation failed, did not get confirmation from the quorum");
-            throw new IOException("Failed to save record");
         }
     }
 
@@ -163,6 +170,8 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
                 logger.error("An error occurred while closing the store: " + e.getMessage(), e);
             }
         });
+
+        quorumExecutorService.shutdownNow();
     }
 
     private void resetFromLastTripping() {
@@ -170,9 +179,9 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
     }
 
     private void failIfQuorumIsBusy() throws StoreBusyException {
-        long totalOpen = nodes.stream().filter(node -> node.circuitOpen()).count();
+        long totalAccessible = nodes.stream().filter(node -> !node.circuitOpen()).count();
 
-        if (totalOpen >= quorumSize) {
+        if (totalAccessible < quorumSize) {
             logger.error("Quorum has been cut off, backing off...");
             throw new StoreBusyException();
         }
@@ -190,18 +199,8 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
         return state;
     }
 
-    boolean allNodesClosed() {
-        for (ResilientNode node : nodes) {
-            if (!node.circuitClosed()) {
-                return false;
-            }
-        }
-
-        return true;
-    }
-
     void internalWaitUntilStateSwitchThreshold() throws InterruptedException {
-        Thread.sleep(ResilientNode.CIRCUIT_TRIP_THRESHOLD * 1000);
+        nodes.forEach(node -> node.internalTickLastTrippedBackwardsBy(3));
     }
 
     private static class CircuitOpenException extends Exception {
@@ -236,6 +235,7 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
 
         private static final int CIRCUIT_TRIP_THRESHOLD = 3;
         private static final int MAX_RETRIES = 3;
+        private static final long RESET_TIME_INTERVAL_MILLIS = 3000;
 
         private enum State {
             Closed,
@@ -245,12 +245,14 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
 
         private final AtomicReference<State> state;
         private final AppendOnlyLogStore node;
+        
         private final AtomicLong lastTrippedTime;
 
         public ResilientNode(AppendOnlyLogStore store) {
             node = store;
             state = new AtomicReference<State>(State.Closed);
-            lastTrippedTime = new AtomicLong();
+            
+            lastTrippedTime = new AtomicLong(Long.MIN_VALUE);
         }
 
         public void put(IdempotencyKey idempotencyKey, String key, String value) throws CircuitOpenException {
@@ -267,7 +269,7 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
                 try {
                     // Could get opened by other threads
                     if (circuitOpen()) {
-                        break;
+                        throw new CircuitOpenException(node);
                     }
 
                     node.put(idempotencyKey, key, value);
@@ -301,17 +303,28 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
         }
 
         public synchronized void resetCircuit() {
-            long currentTime = System.nanoTime();
+            long tripTime = lastTrippedTime.get();
 
-            if (lastTrippedTime.get() <= 0) {
+            if (tripTime == Long.MIN_VALUE) {
                 return;
             }
 
-            long timeLapse = TimeUnit.NANOSECONDS.toSeconds(currentTime - lastTrippedTime.get());
-            if (timeLapse >= CIRCUIT_TRIP_THRESHOLD) {
+            long currentTime = System.nanoTime();
+            long timeLapse = TimeUnit.NANOSECONDS.toMillis(currentTime - lastTrippedTime.get());
+
+            if (timeLapse >= RESET_TIME_INTERVAL_MILLIS) {
                 halfOpenCircuit();
-                lastTrippedTime.set(0);
+                lastTrippedTime.set(Long.MIN_VALUE);
             }
+        }
+
+        private void internalTickLastTrippedBackwardsBy(int ticksInSeconds) {
+            long tripTime = lastTrippedTime.get();
+            if (tripTime == Long.MIN_VALUE) {
+                return;
+            }
+
+            lastTrippedTime.set(tripTime - TimeUnit.SECONDS.toNanos(ticksInSeconds));
         }
 
         private boolean circuitHalfOpen() {
@@ -320,10 +333,6 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
 
         private boolean circuitOpen() {
             return (state.get() == State.Open);
-        }
-
-        private boolean circuitClosed() {
-            return (state.get() == State.Closed);
         }
 
         private void closeCircuit() {
@@ -341,9 +350,11 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
                 logger.warn("Switching to open state");
 
                 State expectedState = (halfOpen ? State.HalfOpen : State.Closed);
-                state.compareAndSet(expectedState, State.Open);
-
-                lastTrippedTime.set(System.nanoTime());
+                
+                if (state.compareAndSet(expectedState, State.Open)) {
+                    lastTrippedTime.set(System.nanoTime());
+                    
+                }
             }
         }
 

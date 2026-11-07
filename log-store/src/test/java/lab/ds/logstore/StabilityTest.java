@@ -1,5 +1,6 @@
 package lab.ds.logstore;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
@@ -13,15 +14,12 @@ import static org.mockito.Mockito.when;
 
 import java.io.IOException;
 import java.time.Duration;
-import java.util.Random;
-import java.util.random.RandomGenerator;
+import java.time.temporal.TemporalUnit;
 
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.invocation.InvocationOnMock;
 import org.mockito.junit.jupiter.MockitoExtension;
-import org.mockito.stubbing.Answer;
 import org.mockito.stubbing.Stubber;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -32,6 +30,127 @@ import lab.ds.logstore.core.IdempotencyKey;
 public class StabilityTest {
 
     private static Logger logger = LoggerFactory.getLogger(StabilityTest.class.getCanonicalName());
+
+    @Test
+    public void assertsMajoritySuccess() throws IOException, StoreInitializationException {
+        AppendOnlyLogStore[] stores = new AppendOnlyLogStore[3];
+
+        AppendOnlyLogStore firstMockedStore = mock(AppendOnlyLogStore.class);
+
+        doThrow(IOException.class)
+                .when(firstMockedStore)
+                .put(any(), anyString(), anyString());
+
+        stores[0] = firstMockedStore;
+
+        for (int i = 1; i <= 2; i++) {
+            AppendOnlyLogStore mockedStore = mock(AppendOnlyLogStore.class);
+
+            doAnswer(invocation -> 1L)
+                    .when(mockedStore)
+                    .put(any(), anyString(), anyString());
+
+            stores[i] = mockedStore;
+        }
+
+        try (AppendOnlyLogStoreClient storeClient = new AppendOnlyLogStoreClient(stores)) {
+            assertDoesNotThrow(() -> storeClient.put("key-1", "value-1"));
+        }
+    }
+
+    @Test
+    public void assertsMajorityFailure() throws IOException, StoreInitializationException {
+        AppendOnlyLogStore[] stores = new AppendOnlyLogStore[3];
+
+        AppendOnlyLogStore firstMockedStore = mock(AppendOnlyLogStore.class);
+
+        doAnswer(invocation -> 1L)
+                .when(firstMockedStore)
+                .put(any(), anyString(), anyString());
+
+        stores[0] = firstMockedStore;
+
+        for (int i = 1; i <= 2; i++) {
+            AppendOnlyLogStore mockedStore = mock(AppendOnlyLogStore.class);
+
+            doThrow(IOException.class)
+                    .when(mockedStore)
+                    .put(any(), anyString(), anyString());
+
+            stores[i] = mockedStore;
+        }
+
+        try (AppendOnlyLogStoreClient storeClient = new AppendOnlyLogStoreClient(stores)) {
+            assertThrows(IOException.class, () -> storeClient.put("key-1", "value-1"));
+        }
+    }
+
+    @Test
+    public void rejectsSlowMajority() throws IOException, StoreInitializationException {
+        AppendOnlyLogStore[] stores = new AppendOnlyLogStore[3];
+
+        for (int i = 0; i < 3; i++) {
+            AppendOnlyLogStore mockedStore = mock(AppendOnlyLogStore.class);
+
+            doAnswer(invocation -> {
+                Thread.sleep(Duration.ofSeconds(10));
+                return 1L;
+            }).when(mockedStore).put(any(), anyString(), anyString());
+
+            stores[i] = mockedStore;
+        }
+
+        try (AppendOnlyLogStoreClient storeClient = new AppendOnlyLogStoreClient(stores)) {
+            assertThrows(OperationStateUnknownException.class, () -> storeClient.put("key-1", "value-1"));
+        }
+    }
+
+    @Test
+    public void assertsOpenCircuits() throws IOException, StoreInitializationException {
+        AppendOnlyLogStore[] stores = new AppendOnlyLogStore[3];
+
+        for (int i = 0; i < 3; i++) {
+            AppendOnlyLogStore mockedStore = mock(AppendOnlyLogStore.class);
+
+            doThrow(IOException.class)
+                    .when(mockedStore)
+                    .put(any(), anyString(), anyString());
+
+            stores[i] = mockedStore;
+        }
+
+        try (AppendOnlyLogStoreClient storeClient = new AppendOnlyLogStoreClient(stores)) {
+            assertThrows(IOException.class, () -> storeClient.put("key-1", "value-1"));
+            assertThrows(StoreBusyException.class, () -> storeClient.put("key-1", "value-1"));
+        }
+    }
+
+    @Test
+    public void assertsHalfOpenCircuits() throws IOException, StoreInitializationException, InterruptedException {
+        AppendOnlyLogStore[] stores = new AppendOnlyLogStore[3];
+
+        for (int i = 0; i < 3; i++) {
+            AppendOnlyLogStore mockedStore = mock(AppendOnlyLogStore.class);
+
+            doThrow(IOException.class)
+                    .doThrow(IOException.class)
+                    .doThrow(IOException.class)
+                    .doAnswer(invocation -> 1L)
+                    .when(mockedStore)
+                    .put(any(), anyString(), anyString());
+
+            stores[i] = mockedStore;
+        }
+
+        try (AppendOnlyLogStoreClient storeClient = new AppendOnlyLogStoreClient(stores)) {
+            assertThrows(IOException.class, () -> storeClient.put("key-1", "value-1"));
+            assertThrows(StoreBusyException.class, () -> storeClient.put("key-1", "value-1"));
+
+            storeClient.internalWaitUntilStateSwitchThreshold();
+
+            assertDoesNotThrow(() -> storeClient.put("key-1", "value-1"));
+        }
+    }
 
     /**
      * This test asserts failure modes handled by {@code AppendOnlyLogStoreClient}.
@@ -60,17 +179,12 @@ public class StabilityTest {
 
         AppendOnlyLogStore[] stores = new AppendOnlyLogStore[3];
 
-        RandomGenerator randomGenerator = RandomGenerator.getDefault();
-        
-        int delayedExceptionIndex = randomGenerator.nextInt(0, 3);
-        int delayedAnswerIndex = randomGenerator.nextInt(0, 3);
-
         for (int i = 0; i < 3; i++) {
             AppendOnlyLogStore mockedStore = mock(AppendOnlyLogStore.class);
 
             Stubber putStubber = null;
-            
-            if (i == delayedExceptionIndex) {
+
+            if (i == 1) {
                 putStubber = doThrow(IOException.class).doAnswer(invocation -> {
                     logger.info("Delaying IOException throw...");
                     Thread.sleep(Duration.ofSeconds(3));
@@ -87,11 +201,11 @@ public class StabilityTest {
                     .doThrow(IOException.class);
 
             // Called after 2nd wait, closes the circuit
-            if (i == delayedAnswerIndex) {
+            if (i == 2) {
                 putStubber.doAnswer(invocation -> {
                     logger.info("Delaying answer...");
-                    Thread.sleep(3);
-                    
+                    Thread.sleep(Duration.ofSeconds(3));
+
                     return 1L;
                 });
             } else {
