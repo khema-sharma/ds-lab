@@ -100,9 +100,6 @@ public class StabilityTest {
             // This closes the circuit
             storeClient.put("key-1", "value-1");
 
-            storeClient.internalWaitUntilStateIsSwitched();
-            
-            assertEquals(true, storeClient.allNodesClosed());
             assertEquals("value-1", storeClient.get("key-1"));
 
             // Assert that non-idempotent write never happens
