@@ -9,6 +9,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -56,6 +57,8 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
 
     private static final String ERR_IN_INIT = "An error occurred while initializing store: {0}";
 
+    private final String id;
+
     private File store;
 
     private StoreWriter storeWriter;
@@ -82,6 +85,10 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
     private final Object lockMonitor;
     private final Map<String, ReentrantLock> rwLocks;
 
+    private static String random8LetterHex() {
+        return UUID.randomUUID().toString().replaceAll("-", "").substring(0, 7);
+    }
+
     public AppendOnlyLogStore() throws StoreInitializationException {
         this(LogStoreRole.SINGLE);
     }
@@ -103,6 +110,8 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
                     MessageFormat.format(ERR_IN_INIT, e.getMessage()), e);
         }
 
+        id = "store_" + random8LetterHex();
+
         leaderReplicationMonitor = new Object();
         lockMonitor = new Object();
 
@@ -120,6 +129,10 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
         buildIndexes();
 
         logger.info("Created store at: " + store.getAbsolutePath());
+    }
+
+    public String id() {
+        return id;
     }
 
     @Override

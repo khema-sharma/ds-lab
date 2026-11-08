@@ -14,7 +14,7 @@ import static org.mockito.Mockito.when;
 
 import java.io.IOException;
 import java.time.Duration;
-import java.time.temporal.TemporalUnit;
+import java.util.UUID;
 
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -29,13 +29,13 @@ import lab.ds.logstore.core.IdempotencyKey;
 @ExtendWith(MockitoExtension.class)
 public class StabilityTest {
 
-    private static Logger logger = LoggerFactory.getLogger(StabilityTest.class.getCanonicalName());
+    private static Logger logger = LoggerFactory.getLogger(StabilityTest.class.getSimpleName());
 
     @Test
     public void assertsMajoritySuccess() throws IOException, StoreInitializationException {
         AppendOnlyLogStore[] stores = new AppendOnlyLogStore[3];
 
-        AppendOnlyLogStore firstMockedStore = mock(AppendOnlyLogStore.class);
+        AppendOnlyLogStore firstMockedStore = mockStore();
 
         doThrow(IOException.class)
                 .when(firstMockedStore)
@@ -44,7 +44,7 @@ public class StabilityTest {
         stores[0] = firstMockedStore;
 
         for (int i = 1; i <= 2; i++) {
-            AppendOnlyLogStore mockedStore = mock(AppendOnlyLogStore.class);
+            AppendOnlyLogStore mockedStore = mockStore();
 
             doAnswer(invocation -> 1L)
                     .when(mockedStore)
@@ -62,7 +62,7 @@ public class StabilityTest {
     public void assertsMajorityFailure() throws IOException, StoreInitializationException {
         AppendOnlyLogStore[] stores = new AppendOnlyLogStore[3];
 
-        AppendOnlyLogStore firstMockedStore = mock(AppendOnlyLogStore.class);
+        AppendOnlyLogStore firstMockedStore = mockStore();
 
         doAnswer(invocation -> 1L)
                 .when(firstMockedStore)
@@ -71,7 +71,7 @@ public class StabilityTest {
         stores[0] = firstMockedStore;
 
         for (int i = 1; i <= 2; i++) {
-            AppendOnlyLogStore mockedStore = mock(AppendOnlyLogStore.class);
+            AppendOnlyLogStore mockedStore = mockStore();
 
             doThrow(IOException.class)
                     .when(mockedStore)
@@ -90,7 +90,7 @@ public class StabilityTest {
         AppendOnlyLogStore[] stores = new AppendOnlyLogStore[3];
 
         for (int i = 0; i < 3; i++) {
-            AppendOnlyLogStore mockedStore = mock(AppendOnlyLogStore.class);
+            AppendOnlyLogStore mockedStore = mockStore();
 
             doAnswer(invocation -> {
                 Thread.sleep(Duration.ofSeconds(10));
@@ -106,11 +106,11 @@ public class StabilityTest {
     }
 
     @Test
-    public void assertsOpenCircuits() throws IOException, StoreInitializationException {
+    public void assertsClosedToOpenTransition() throws IOException, StoreInitializationException {
         AppendOnlyLogStore[] stores = new AppendOnlyLogStore[3];
 
         for (int i = 0; i < 3; i++) {
-            AppendOnlyLogStore mockedStore = mock(AppendOnlyLogStore.class);
+            AppendOnlyLogStore mockedStore = mockStore();
 
             doThrow(IOException.class)
                     .when(mockedStore)
@@ -126,11 +126,12 @@ public class StabilityTest {
     }
 
     @Test
-    public void assertsHalfOpenCircuits() throws IOException, StoreInitializationException, InterruptedException {
+    public void assertsHalfOpenToClosedTransition()
+            throws IOException, StoreInitializationException, InterruptedException {
         AppendOnlyLogStore[] stores = new AppendOnlyLogStore[3];
 
         for (int i = 0; i < 3; i++) {
-            AppendOnlyLogStore mockedStore = mock(AppendOnlyLogStore.class);
+            AppendOnlyLogStore mockedStore = mockStore();
 
             doThrow(IOException.class)
                     .doThrow(IOException.class)
@@ -180,7 +181,7 @@ public class StabilityTest {
         AppendOnlyLogStore[] stores = new AppendOnlyLogStore[3];
 
         for (int i = 0; i < 3; i++) {
-            AppendOnlyLogStore mockedStore = mock(AppendOnlyLogStore.class);
+            AppendOnlyLogStore mockedStore = mockStore();
 
             Stubber putStubber = null;
 
@@ -250,6 +251,13 @@ public class StabilityTest {
 
         }
 
+    }
+
+    private AppendOnlyLogStore mockStore() {
+        AppendOnlyLogStore store = mock(AppendOnlyLogStore.class);
+        when(store.id()).thenReturn("store_" + UUID.randomUUID().toString().replaceAll("-", "").substring(0, 7));
+
+        return store;
     }
 
 }
