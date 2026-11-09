@@ -12,8 +12,11 @@ import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorCompletionService;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
@@ -82,8 +85,13 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
     private final AtomicReference<CountDownLatch> replicationCallsWaitLatch;
     private final Object leaderReplicationMonitor;
 
+    // Guards lockKey
     private final Object lockMonitor;
+
+    // Guarded by lockMonitor
     private final Map<String, ReentrantLock> rwLocks;
+
+    private final ExecutorService writerExecutor;
 
     private static String random8LetterHex() {
         return UUID.randomUUID().toString().replaceAll("-", "").substring(0, 7);
@@ -125,6 +133,9 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
         indexes = new ConcurrentHashMap<>();
         rwLocks = new ConcurrentHashMap<>();
 
+        // Unbounded single thread that execute a write task
+        writerExecutor = Executors.newSingleThreadExecutor();
+
         lastOffset = 0;
         buildIndexes();
 
@@ -142,6 +153,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
         }
 
         checkFencingTerm();
+
         writeRecord(key, value);
     }
 
@@ -194,6 +206,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
         outboxStore.close();
 
         replicatorService.shutdownNow();
+        writerExecutor.shutdownNow();
     }
 
     public String getPath() {
@@ -233,12 +246,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
         ReentrantLock keyLock = null;
 
         synchronized (lockMonitor) {
-            if (rwLocks.containsKey(key)) {
-                keyLock = rwLocks.get(key);
-            } else {
-                keyLock = new ReentrantLock();
-                rwLocks.put(key, keyLock);
-            }
+            keyLock = rwLocks.compute(key, (k, v) -> (v == null ? new ReentrantLock() : v));
         }
 
         keyLock.lock();
@@ -313,7 +321,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
 
         if (replicationTerm < activeReplTerm) {
             logger.error(MessageFormat.format("Active replication term, {0}, is ahead of my replication term, {1}.",
-                            activeReplTerm, replicationTerm));
+                    activeReplTerm, replicationTerm));
             logger.error("Cannot process write request!");
 
             throw new IllegalStateException();
@@ -337,23 +345,54 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
     }
 
     private long writeRecord(String key, String value) throws IOException {
-        long timestamp = System.currentTimeMillis();
+        try {
+            ExecutorCompletionService<Long> putCompletionService = new ExecutorCompletionService<>(writerExecutor);
 
-        LogStoreEntrySet storeEntry = storeWriter.insertRecord(key, value);
-        LogStoreEntrySet cdcEntry = storeWriter.insertCdcRecord(CdcRecord.TYPE_INSERT,
-                timestamp, new LogStoreInsertEvent(key, value));
+            putCompletionService.submit(() -> {
+                long timestamp = System.currentTimeMillis();
 
-        lastOffset = storeEntry.offset();
+                LogStoreEntrySet storeEntry = storeWriter.insertRecord(key, value);
+                LogStoreEntrySet cdcEntry = storeWriter.insertCdcRecord(CdcRecord.TYPE_INSERT,
+                        timestamp, new LogStoreInsertEvent(key, value));
 
-        indexes.put(key, lastOffset);
+                lastOffset = storeEntry.offset();
 
-        outboxStore.recordInserted(cdcEntry);
+                indexes.put(key, lastOffset);
 
-        if (isLeader()) {
-            replicateRecordToFollowers(((DataEntry) storeEntry.entry()).record());
+                outboxStore.recordInserted(cdcEntry);
+
+                if (isLeader()) {
+                    replicateRecordToFollowers(((DataEntry) storeEntry.entry()).record());
+                }
+
+                return lastOffset;
+            });
+
+            Future<Long> writeResult = putCompletionService.poll(3, TimeUnit.SECONDS);
+
+            if (writeResult == null) {
+                throw new OperationStateUnknownException(null,
+                        "Timeout while awaiting for the write to complete, status is unknown");
+            }
+
+            return writeResult.get();
+
+        } catch (InterruptedException e) {
+            Thread.interrupted();
+            throw new OperationStateUnknownException(null,
+                    "Interrupted while awaiting for the write to complete, status is unknown");
+
+        } catch (ExecutionException e) {
+            Throwable exception = e.getCause();
+
+            if (exception instanceof IOException io) {
+                throw io;
+            } else if (exception instanceof RuntimeException re) {
+                throw re;
+            }
+
+            throw new IOException(e);
         }
-
-        return lastOffset;
     }
 
     private void initStore(String path) throws StoreInitializationException {

@@ -2,10 +2,13 @@ package lab.ds.logstore;
 
 import java.io.Closeable;
 import java.io.IOException;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorCompletionService;
@@ -60,39 +63,26 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
     }
 
     /**
-     * Puts the key-value pair (record) in the store.
-     * <p>
-     * The client implements Circuit Breaker stability pattern. It opens the circuit
-     * when it fails to get an answer from the downstream store after retrying three
-     * times. It uses an idempotency key to protect the duplicate writes.
-     * <p>
-     * The client does not have an explicit solution in place to protect itself from
-     * getting crushed under load using Bulkheads stability pattern. It somewhat
-     * handles it by using a fixed thread pool, but still a complete solution is not
-     * in place.
+     * Generates an idempotency key and calls
+     * {@link #put(IdempotencyKey, String, String)}.
      * 
      * @param key   Key to be used to fetch the data
      * @param value Value to be saved in the store
      * 
-     * @throws StoreBusyException             if quorum is not accessible, use
-     *                                        {@code idempotencyKey} to retry put
-     *                                        again
-     * @throws QuorumNotReachedException      if put operation on quorum failed,
-     *                                        put operation on minority could still
-     *                                        succeed, use {@code idempotencyKey}
-     *                                        for retrying put
-     * @throws OperationStateUnknownException if quorum put status is not
-     *                                        deterministic, try again with
-     *                                        {@code idempotencyKey}
      */
     @Override
-    public void put(String key, String value) throws IOException {
+    public void put(String key, String value) throws RetryableStoreException {
         put(new IdempotencyKey(UUID.randomUUID().toString()), key, value);
     }
 
+    
     @Override
-    public void put(IdempotencyKey idempotencyKey, String key, String value) throws IOException {
-        resetFromLastTripping();
+    public void put(IdempotencyKey idempotencyKey, String key, String value) throws RetryableStoreException {
+        if (idempotencyKey == null) {
+            throw new IllegalArgumentException("idempotencyKey cannot be null.");
+        }
+
+        resetCircuit();
 
         logger.info("Attempting the put operation on the quorum...");
         failIfQuorumIsBusy(idempotencyKey);
@@ -145,11 +135,11 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
                             "Unable to determine the state of the put operation");
                 }
 
-                if (successCount == 0 && openCircuitErrors == failureCount) {
+                if (successCount == 0 && openCircuitErrors == poolSize) {
                     throw new StoreBusyException(idempotencyKey);
                 }
 
-                throw new QuorumNotReachedException("Failed to save record", idempotencyKey);
+                throw new QuorumNotReachedException(idempotencyKey, "Failed to save record");
             }
 
             logger.info("put operation on the quorum was successful");
@@ -201,7 +191,7 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
         quorumExecutorService.shutdownNow();
     }
 
-    private void resetFromLastTripping() {
+    private void resetCircuit() {
         nodes.forEach(node -> node.resetCircuit());
     }
 
@@ -230,6 +220,12 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
         nodes.forEach(node -> node.internalTickLastTrippedBackwardsBy(3));
     }
 
+    private ExecutorService createdBoundedFixedPoolExecutor() {
+        return Executors.newFixedThreadPool(5);
+        // return new ThreadPoolExecutor(quorumSize, poolSize, 60L, TimeUnit.SECONDS,
+        // new ArrayBlockingQueue<>(quorumSize), new ThreadPoolExecutor.AbortPolicy());
+    }
+
     private static class CircuitOpenException extends Exception {
 
         public CircuitOpenException(AppendOnlyLogStore node) {
@@ -238,18 +234,15 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
 
     }
 
-    private ExecutorService createdBoundedFixedPoolExecutor() {
-            return Executors.newFixedThreadPool(5);
-            // return new ThreadPoolExecutor(quorumSize, poolSize, 60L, TimeUnit.SECONDS,
-            //         new ArrayBlockingQueue<>(quorumSize), new ThreadPoolExecutor.AbortPolicy());
-        }
-
     private static class OperationRuntimeException extends RuntimeException {
 
         public OperationRuntimeException(AppendOnlyLogStore node, String message, List<Throwable> causes) {
             super(message);
         }
 
+    }
+
+    private record RunningPutOperation(Future<Long> future, long since) {
     }
 
     /**
@@ -269,7 +262,9 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
         private static final int CIRCUIT_TRIP_THRESHOLD = 3;
         private static final int MAX_RETRIES = 3;
         private static final long RESET_TIME_INTERVAL = TimeUnit.SECONDS.toNanos(3);
+
         private static final int PUT_TIMEOUT_SECS = 3;
+        private static final int CANCELED_PUT_TIMEOUT_SECS = MAX_RETRIES * PUT_TIMEOUT_SECS;
 
         private enum State {
             Closed, HalfOpen, Probing, Open
@@ -282,11 +277,15 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
         private final AppendOnlyLogStore node;
         private final AtomicReference<CurrentState> currentState;
 
+        private final Map<IdempotencyKey, RunningPutOperation> runningOperations;
+
         public ResilientNode(AppendOnlyLogStore store) {
             node = store;
             currentState = new AtomicReference<CurrentState>(new CurrentState(State.Closed, Long.MIN_VALUE));
 
             putExecutor = Executors.newFixedThreadPool(5);
+
+            runningOperations = new ConcurrentHashMap<>();
         }
 
         public void put(IdempotencyKey idempotencyKey, String key, String value)
@@ -354,16 +353,18 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
                     break;
 
                 } catch (IOException e) {
-                    if (Thread.currentThread().isInterrupted()) {
-                        throw e;
-                    }
-
                     opExceptions.add(e);
                     retryCount++;
 
                     if (e instanceof OperationStateUnknownException) {
                         unknowStateErrors++;
                     }
+
+                    backOffExponentially(retryCount);
+                } catch (Exception e) {
+                    transitionState(State.Closed, State.Open);
+                    throw new OperationStateUnknownException(idempotencyKey,
+                            "Could not detemine the state of the put operation on node " + node.id());
                 }
             } while (retryCount < MAX_RETRIES);
 
@@ -384,12 +385,16 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
         }
 
         private long putWithTimeout(IdempotencyKey idempotencyKey, String key, String value) throws IOException {
-            Future<Long> opFuture = putExecutor.submit(() -> {
-                return node.put(idempotencyKey, key, value);
-            });
+            Future<Long> opFuture = admitPutOperation(idempotencyKey, key, value);
 
             try {
-                return opFuture.get(PUT_TIMEOUT_SECS, TimeUnit.SECONDS);
+                logger.trace("  submitted timed put for node" + node.id());
+
+                long offset = opFuture.get(PUT_TIMEOUT_SECS, TimeUnit.SECONDS);
+                releasePutOperation(idempotencyKey, opFuture);
+
+                return offset;
+
             } catch (InterruptedException e) {
                 opFuture.cancel(true);
                 Thread.currentThread().interrupt();
@@ -397,10 +402,14 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
                 throw new OperationStateUnknownException(idempotencyKey, e);
 
             } catch (TimeoutException e) {
+                logger.info(" operation timed out in node " + node.id() + ", submitted task may complete in future");
+
                 opFuture.cancel(true);
                 throw new OperationStateUnknownException(idempotencyKey, e);
 
             } catch (ExecutionException e) {
+                releasePutOperation(idempotencyKey, opFuture);
+
                 if (e.getCause() instanceof IOException io) {
                     throw io;
                 }
@@ -450,6 +459,49 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
                 if (currentState.compareAndSet(cState, new CurrentState(to, openedAt))) {
                     return true;
                 }
+            }
+        }
+
+        private void releasePutOperation(IdempotencyKey idempotencyKey, Future<Long> putOp) {
+            synchronized (this) {
+                RunningPutOperation runningOp = runningOperations.get(idempotencyKey);
+
+                if (runningOp != null && runningOp.future().equals(putOp)) {
+                    runningOperations.remove(idempotencyKey);
+                }
+            }
+        }
+
+        private Future<Long> admitPutOperation(IdempotencyKey idempotencyKey, String key, String value)
+                throws OperationStateUnknownException {
+            synchronized (this) {
+                Future<Long> opFuture;
+                RunningPutOperation runnnigPutOp = runningOperations.get(idempotencyKey);
+
+                if (runnnigPutOp != null && !existingPutOperationExpired(runnnigPutOp)) {
+                    logger.error(" rejected the retry, allowing previous attempt to complete");
+                    throw new OperationStateUnknownException(idempotencyKey,
+                            "Won't admit a new put until the existing put completes");
+                }
+
+                opFuture = putExecutor.submit(() -> node.put(idempotencyKey, key, value));
+                runnnigPutOp = new RunningPutOperation(opFuture, System.nanoTime());
+
+                runningOperations.put(idempotencyKey, runnnigPutOp);
+                return opFuture;
+            }
+        }
+
+        private boolean existingPutOperationExpired(RunningPutOperation task) {
+            return (System.nanoTime() - task.since() > TimeUnit.SECONDS.toNanos(CANCELED_PUT_TIMEOUT_SECS));
+        }
+
+        private void backOffExponentially(int retryCount) {
+            try {
+                Thread.sleep(Duration.ofSeconds(2 ^ retryCount));
+            } catch (InterruptedException ie) {
+                logger.error("Interrupted while backing off the put operation exponentially for node " + node.id());
+                Thread.interrupted();
             }
         }
 

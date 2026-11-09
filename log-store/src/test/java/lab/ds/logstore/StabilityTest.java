@@ -102,6 +102,7 @@ public class StabilityTest {
 
         try (AppendOnlyLogStoreClient storeClient = new AppendOnlyLogStoreClient(stores)) {
             assertThrows(OperationStateUnknownException.class, () -> storeClient.put("key-1", "value-1"));
+            assertThrows(StoreBusyException.class, () -> storeClient.put("key-1", "value-1"));
         }
     }
 
