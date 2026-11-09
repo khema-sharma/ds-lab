@@ -81,7 +81,7 @@ public class StabilityTest {
         }
 
         try (AppendOnlyLogStoreClient storeClient = new AppendOnlyLogStoreClient(stores)) {
-            assertThrows(IOException.class, () -> storeClient.put("key-1", "value-1"));
+            assertThrows(QuorumNotReachedException.class, () -> storeClient.put("key-1", "value-1"));
         }
     }
 
@@ -120,7 +120,7 @@ public class StabilityTest {
         }
 
         try (AppendOnlyLogStoreClient storeClient = new AppendOnlyLogStoreClient(stores)) {
-            assertThrows(IOException.class, () -> storeClient.put("key-1", "value-1"));
+            assertThrows(QuorumNotReachedException.class, () -> storeClient.put("key-1", "value-1"));
             assertThrows(StoreBusyException.class, () -> storeClient.put("key-1", "value-1"));
         }
     }
@@ -144,7 +144,7 @@ public class StabilityTest {
         }
 
         try (AppendOnlyLogStoreClient storeClient = new AppendOnlyLogStoreClient(stores)) {
-            assertThrows(IOException.class, () -> storeClient.put("key-1", "value-1"));
+            assertThrows(QuorumNotReachedException.class, () -> storeClient.put("key-1", "value-1"));
             assertThrows(StoreBusyException.class, () -> storeClient.put("key-1", "value-1"));
 
             storeClient.internalWaitUntilStateSwitchThreshold();
@@ -222,7 +222,7 @@ public class StabilityTest {
 
         try (AppendOnlyLogStoreClient storeClient = new AppendOnlyLogStoreClient(stores)) {
             // Three failures in sequence must open the circuit
-            assertThrows(IOException.class, () -> storeClient.put("key-1", "value-1"));
+            assertThrows(QuorumNotReachedException.class, () -> storeClient.put("key-1", "value-1"));
 
             // Exception thrown by client when circuit is open
             // Call should never reach the mocked store
@@ -232,7 +232,7 @@ public class StabilityTest {
 
             // Circuit must be half-open, mocked store will call the actual store's method
             // and trip back
-            assertThrows(IOException.class, () -> storeClient.put("key-1", "value-1"));
+            assertThrows(QuorumNotReachedException.class, () -> storeClient.put("key-1", "value-1"));
 
             // Unlike closed state, half-open state will open the circuit immediately
             assertThrows(StoreBusyException.class, () -> storeClient.put("key-1", "value-1"));
