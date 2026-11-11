@@ -13,7 +13,7 @@ public class RetryableStoreException extends IOException {
     private final IdempotencyKey idempotencyKey;
 
     public RetryableStoreException(IdempotencyKey key, Throwable cause) {
-        super(cause.getMessage(), cause);
+        super(cause);
         idempotencyKey = key;
     }
 
