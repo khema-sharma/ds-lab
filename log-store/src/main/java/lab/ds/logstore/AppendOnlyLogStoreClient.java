@@ -2,14 +2,14 @@ package lab.ds.logstore;
 
 import java.io.Closeable;
 import java.io.IOException;
+import java.sql.Time;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
-import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorCompletionService;
@@ -19,6 +19,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -72,7 +73,7 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
         poolSize = size;
         quorumSize = (poolSize * 4) / 5;
 
-        quorumExecutorService = createdBoundedFixedPoolExecutor();
+        quorumExecutorService = createdFixedPoolExecutor();
 
         nodes = new ArrayList<>(poolSize);
         for (int i = 0; i < poolSize; i++) {
@@ -211,7 +212,12 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
             }
         });
 
-        quorumExecutorService.shutdownNow();
+        try {
+            quorumExecutorService.shutdownNow();
+            quorumExecutorService.awaitTermination(QUORUM_TIMOUT_NANOS, TimeUnit.NANOSECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
     }
 
     private void resetCircuits() {
@@ -243,8 +249,8 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
         nodes.forEach(node -> node.internalTickLastTrippedBackwardsBy(9));
     }
 
-    private ExecutorService createdBoundedFixedPoolExecutor() {
-        return Executors.newFixedThreadPool(5);
+    private ExecutorService createdFixedPoolExecutor() {
+        return Executors.newFixedThreadPool(poolSize);
     }
 
     private static class CircuitOpenException extends Exception {
@@ -268,10 +274,7 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
      * <p>
      * It uses Circuit Breaker pattern to protect the downstream store from getting
      * overloaded by tripping the circuit whenever it gets consecutive errors.
-     * <p>
-     * Before considering the downstream store as "loaded", it reties the operations
-     * multiple times to see if the errors are transient. In its current shape the
-     * retries are not backedoff incremently, they happen immediately.
+     * 
      */
     private static class ResilientNode {
 
@@ -288,42 +291,99 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
             Closed, HalfOpen, Probing, Open
         }
 
-        private AtomicInteger retryCounter = new AtomicInteger();
-
-        private record RunningPutOperation(CompletableFuture<Long> future, long since) {
+        private record RunningPutOperation(CompletableFuture<Long> future, AtomicBoolean started, long since) {
 
             public static RunningPutOperation newCompleteableOperation() {
-                return new RunningPutOperation(new CompletableFuture<Long>(), System.nanoTime());
-            }
-
-            public static RunningPutOperation newCompletedOperation(long result, RunningPutOperation runningOp) {
-                return new RunningPutOperation(CompletableFuture.completedFuture(result),
-                        runningOp != null ? runningOp.since() : Long.MIN_VALUE);
+                return new RunningPutOperation(new CompletableFuture<Long>(), new AtomicBoolean(false), -1);
             }
 
             public boolean expired() {
                 return (System.nanoTime() - since) >= PUT_TASK_EXPIRY_NANOS;
             }
 
+            public void start() {
+                started.compareAndSet(false, true);
+            }
+
+            public void complete(long result) {
+                future.complete(result);
+            }
+
+            public void completeExceptionally(Throwable throwable) {
+                future.completeExceptionally(throwable);
+            }
+
         }
 
-        private record CurrentState(State state, long openedAt) {
+        private record CurrentState(State state, long openedAt, AtomicInteger failures) {
         }
 
         private final ExecutorService putExecutor;
         private final AppendOnlyLogStore node;
         private final AtomicReference<CurrentState> currentState;
 
-        private final Map<IdempotencyKey, RunningPutOperation> runningOperations;
+        // private final Map<IdempotencyKey, RunningPutOperation> runningOperations;
 
         public ResilientNode(AppendOnlyLogStore store) {
             node = store;
 
-            currentState = new AtomicReference<CurrentState>(new CurrentState(State.Closed, Long.MIN_VALUE));
+            currentState = new AtomicReference<CurrentState>(
+                    new CurrentState(State.Closed, Long.MIN_VALUE, new AtomicInteger()));
+
             putExecutor = Executors.newFixedThreadPool(5);
-            runningOperations = new ConcurrentHashMap<>();
+
+            // runningOperations = new ConcurrentHashMap<>();
         }
 
+        /**
+         * Puts the given key-value pair (record) to the wrapped
+         * {@code AppendOnlyLogStore}.
+         * 
+         * <p>
+         * This method's execution path varies depending on the node's circuit state
+         * (Closed/Opened/Half Opened</b>).
+         * <br/>
+         * <b>Closed:</b>
+         * <p>
+         * If circuit is closed then it calls store's put method from inside a retry
+         * loop (3 iterations in its current shape). Failure repeats the iteration,
+         * whereas a success will immediately return. If the retry loop exhausts,
+         * because each attempt failed, then the circuit gets opened.
+         *
+         * <b>Open:</b>
+         * 
+         * If the circuit is open then there is no retry loop. The method simply throws
+         * {@code CircuitOpenException} immediately.
+         * 
+         * <b>Half-open:</b>
+         * 
+         * It the circuit is half-open then it tries to move to probing state. If it
+         * fails (because some other put is currently probing) then it throws
+         * {@code CircuitOpenException}. If it succeeds in moving
+         * to probing state then it calls the store's put method once. If call succeeds
+         * then the circuit gets closed else it gets opened again.
+         * 
+         * A note on retry loop:
+         * 
+         * In each retry loop iteration, the store's put is executed asynchronously,
+         * guarded by a timeout (1 second in its current form). If the call does not
+         * complete within this stipulated deadline then it is kept running in the
+         * background and the retry loop continues without accounting it as rertyß. The
+         * background put task is kept alive for a certain period (3 secs in its current
+         * form). In each following iteration the background task status is checked. If
+         * it has completed successfully then its results are returned, if it has failed
+         * then the iteration is marked as failure and depending on number of failures,
+         * the retry loop either continues to next iteration or fails. If the task is
+         * not yet complete but if it has expired then it gets canceled.
+         * 
+         * Each iteration waits for a jittered random period before contuing.
+         * 
+         * @param idempotencyKey
+         * @param key
+         * @param value
+         * @throws CircuitOpenException
+         * @throws IOException
+         */
         public void put(IdempotencyKey idempotencyKey, String key, String value)
                 throws CircuitOpenException, IOException {
             logger.info(" attempting put on " + node.id() + "...");
@@ -340,8 +400,15 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
         }
 
         public void close() throws IOException {
-            node.close();
             putExecutor.shutdownNow();
+
+            try {
+                putExecutor.awaitTermination(PUT_TASK_EXPIRY_NANOS, TimeUnit.NANOSECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            } finally {
+                node.close();
+            }
         }
 
         private void probeOnce(IdempotencyKey idempotencyKey, String key, String value)
@@ -354,13 +421,21 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
             logger.info(" " + node.id() + " will be probed");
 
             try {
-                putWithTimeout(idempotencyKey, key, value);
+                putWithTimeout(RunningPutOperation.newCompleteableOperation(), idempotencyKey, key, value);
                 transitionState(State.Probing, State.Closed);
 
-            } catch (Exception e) {
+            } catch (Throwable e) {
                 transitionState(State.Probing, State.Open);
 
-                throw e;
+                if (e instanceof PendingPutOperationException ppo) {
+                    throw new OperationStateUnknownException(idempotencyKey, ppo.getMessage());
+                }
+
+                if (e instanceof IOException ioe) {
+                    throw ioe;
+                }
+
+                throw new IOException(e);
             }
         }
 
@@ -369,7 +444,8 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
             boolean timeLapsed = (System.nanoTime() - cState.openedAt()) >= RESET_TIME_INTERVAL_NANOS;
 
             if (cState.state() == State.Open && timeLapsed) {
-                if (currentState.compareAndSet(cState, new CurrentState(State.HalfOpen, cState.openedAt()))) {
+                if (currentState.compareAndSet(cState,
+                        new CurrentState(State.HalfOpen, cState.openedAt(), new AtomicInteger()))) {
                     logger.info(node.id() + "'s' circuit was reset");
                 }
             }
@@ -377,12 +453,14 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
 
         private void putWithRetries(IdempotencyKey idempotencyKey, String key, String value)
                 throws CircuitOpenException, IOException {
+
             int unknowStateErrors = 0;
+            int retries = 0;
 
             List<Throwable> opExceptions = new ArrayList<>();
+            AtomicInteger failures = currentState.get().failures();
 
-            runningOperations.put(idempotencyKey,
-                    new RunningPutOperation(CompletableFuture.completedFuture(-1L), System.nanoTime()));
+            Optional<RunningPutOperation> runningOperation = Optional.empty();
 
             do {
                 try {
@@ -396,45 +474,67 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
                                 "Put retry was interrupted for node " + node.id() + ", cannot determine its state");
                     }
 
-                    putWithTimeout(idempotencyKey, key, value);
+                    if (runningOperation.isPresent()) {
+                        Long result = getRunningPutOperationResult(runningOperation.get(), idempotencyKey);
+
+                        if (result != null) {
+                            break;
+                        }
+                    }
+
+                    runningOperation = Optional.of(RunningPutOperation.newCompleteableOperation());
+                    putWithTimeout(runningOperation.get(), idempotencyKey, key, value);
 
                     logger.info(" put operation completed successfully on " + node.id());
                     break;
 
                 } catch (IOException e) {
+                    if (failures.get() == CIRCUIT_TRIP_THRESHOLD - 1) {
+                        transitionState(State.Closed, State.Open);
+                    }
+
+                    failures.incrementAndGet();
+                    
                     opExceptions.add(e);
 
-                    if (!(e instanceof PendingPutOperationException)) {
-                        retryCounter.incrementAndGet();
-                    }
+                    switch (e) {
+                        case PendingPutOperationException pe: {
+                            unknowStateErrors++;
+                            break;
+                        }
+                        case OperationStateUnknownException osu: {
+                            runningOperation = Optional.empty();
 
-                    if (e instanceof OperationStateUnknownException) {
-                        unknowStateErrors++;
-                    }
+                            unknowStateErrors++;
+                            retries++;
 
-                    if (retryCounter.get() < MAX_RETRIES) {
-                        backOffExponentially(retryCounter.get());
+                            break;
+                        }
+                        default: {
+                            runningOperation = Optional.empty();
+                            retries++;
+                        }
+                    };
+
+                    if (retries < MAX_RETRIES) {
+                        backOffExponentially(retries);
                     }
                 } catch (CircuitOpenException e) {
                     throw e;
 
                 } catch (RuntimeException e) {
                     transitionState(State.Closed, State.Open);
+
                     throw new OperationStateUnknownException(idempotencyKey,
                             "Could not detemine the state of the put operation on node " + node.id());
                 }
-            } while (retryCounter.get() < MAX_RETRIES);
+            } while (retries < MAX_RETRIES && failures.get() < CIRCUIT_TRIP_THRESHOLD);
 
-            runningOperations.remove(idempotencyKey);
-
-            if (retryCounter.get() >= CIRCUIT_TRIP_THRESHOLD) {
+            if (failures.get() == CIRCUIT_TRIP_THRESHOLD) {
                 logger.error(" put operation failed on node " + node.id() + ", opening its circuit");
-                transitionState(State.Closed, State.Open);
             }
 
-            if (retryCounter.get() == MAX_RETRIES) {
-                retryCounter.set(0);
-
+            if (retries == MAX_RETRIES) {
                 if (unknowStateErrors > 0) {
                     throw new OperationStateUnknownException(idempotencyKey,
                             "Could not detemine the state of the put operation on node " + node.id());
@@ -445,27 +545,30 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
             }
         }
 
-        private long putWithTimeout(IdempotencyKey idempotencyKey, String key, String value) throws IOException {
-            Long lastResult = getLastPutResult(idempotencyKey, key, value);
+        private long putWithTimeout(RunningPutOperation runningPut, IdempotencyKey idempotencyKey,
+                String key, String value) throws IOException {
 
-            if (lastResult != null) {
-                logger.info(" reusing result of last slow put with idempotency key " + idempotencyKey.key()
-                        + " on node " + node.id());
-
-                return lastResult;
-            }
-
-            runningOperations.put(idempotencyKey, RunningPutOperation.newCompleteableOperation());
+            runningPut.start();
 
             Future<Long> opFuture = putExecutor.submit(() -> {
-                if (Thread.currentThread().isInterrupted()) {
-                    throw new IllegalStateException(
-                            "Put thread was interrupted on node " + node.id() + ", aborting...");
+                long offset = -1;
+                Throwable throwable = null;
+
+                try {
+                    offset = node.put(idempotencyKey, key, value);
+                    return offset;
+
+                } catch (Throwable e) {
+                    throwable = e;
+                    throw e;
+
+                } finally {
+                    if (throwable != null) {
+                        runningPut.completeExceptionally(throwable);
+                    } else {
+                        runningPut.complete(offset);
+                    }
                 }
-
-                long offset = node.put(idempotencyKey, key, value);
-
-                return completePutOperation(idempotencyKey, offset);
             });
 
             logger.trace("  submitted timed put for node" + node.id());
@@ -481,10 +584,10 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
 
             } catch (TimeoutException e) {
                 logger.info(
-                        " operation timed out in node " + node.id() + ", submitted task may complete in the future");
+                        " timeout in node " + node.id() + "'s put");
 
                 opFuture.cancel(true);
-                throw new OperationStateUnknownException(idempotencyKey, e);
+                throw new PendingPutOperationException("Timeout awaiting response from the store.");
 
             } catch (ExecutionException e) {
                 if (e.getCause() instanceof IOException io) {
@@ -497,6 +600,7 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
 
                 throw new IOException(e);
             }
+
         }
 
         private void internalTickLastTrippedBackwardsBy(int ticksInSeconds) {
@@ -509,7 +613,7 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
 
             long pushedBackTime = (tripTime - TimeUnit.SECONDS.toNanos(ticksInSeconds));
 
-            currentState.compareAndSet(cState, new CurrentState(cState.state(), pushedBackTime));
+            currentState.compareAndSet(cState, new CurrentState(cState.state(), pushedBackTime, new AtomicInteger()));
         }
 
         private boolean circuitClosed() {
@@ -533,43 +637,31 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
 
                 long openedAt = (to == State.Open ? System.nanoTime() : cState.openedAt());
 
-                if (currentState.compareAndSet(cState, new CurrentState(to, openedAt))) {
+                if (currentState.compareAndSet(cState, new CurrentState(to, openedAt, new AtomicInteger()))) {
                     return true;
                 }
             }
         }
 
-        private long completePutOperation(IdempotencyKey idempotencyKey, long result) {
-            RunningPutOperation existingOperation = runningOperations.get(idempotencyKey);
-            runningOperations.put(idempotencyKey, RunningPutOperation.newCompletedOperation(result, existingOperation));
+        private Long getRunningPutOperationResult(RunningPutOperation runningOp, IdempotencyKey idempotencyKey)
+                throws PendingPutOperationException, IOException {
 
-            return result;
-        }
+            CompletableFuture<Long> completablePut = runningOp.future();
 
-        private Long getLastPutResult(IdempotencyKey idempotencyKey, String key, String value)
-                throws PendingPutOperationException {
-            RunningPutOperation runnnigPutOp = runningOperations.get(idempotencyKey);
+            if (runningOp.started().get() && !completablePut.isDone() && !runningOp.expired()) {
+                logger.info(" rejected the retry, allowing previous attempt to complete");
 
-            if (runnnigPutOp != null) {
-                CompletableFuture<Long> completablePut = runnnigPutOp.future();
+                throw new PendingPutOperationException(
+                        "Won't submit a new put task until the existing one completes");
 
-                if (!completablePut.isDone() && !runnnigPutOp.expired()) {
-                    logger.trace(" rejected the retry, allowing previous attempt to complete");
-                    throw new PendingPutOperationException(
-                            "Won't submit a new put task until the existing one completes");
+            } else if (completablePut.isDone()) {
+                try {
+                    return completablePut.getNow(Long.MIN_VALUE);
 
-                } else if (completablePut.isDone()) {
-                    try {
-                        long lastResult = completablePut.getNow(-1L);
-
-                        if (lastResult != -1) {
-                            return lastResult;
-                        }
-                    } catch (Exception e) {
-                        Throwable cause = (e instanceof CancellationException) ? e : e.getCause();
-
-                        logger.error(" last put either got canceled or ended with an exception for node "
-                                + node.id() + ", new put task will be submitted: " + cause.getMessage());
+                } catch (Exception e) {
+                    switch (e) {
+                        case CancellationException ce -> throw new OperationStateUnknownException(idempotencyKey, ce.getCause());
+                        default -> throw e;
                     }
                 }
             }

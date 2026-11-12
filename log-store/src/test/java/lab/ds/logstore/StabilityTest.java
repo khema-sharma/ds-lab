@@ -97,7 +97,7 @@ public class StabilityTest {
             AppendOnlyLogStore mockedStore = mockStore();
 
             doAnswer(invocation -> {
-                Thread.sleep(Duration.ofSeconds(2));
+                Thread.sleep(Duration.ofSeconds(5));
                 return 1L;
             }).when(mockedStore).put(any(), anyString(), anyString());
 
@@ -107,7 +107,7 @@ public class StabilityTest {
         for (int i = 0; i < (poolSize - quorumSize); i++) {
             AppendOnlyLogStore mockedStore = mockStore();
 
-            doThrow(IOException.class).when(mockedStore).put(any(), anyString(), anyString());
+            doAnswer(invocation -> 1L).when(mockedStore).put(any(), anyString(), anyString());
 
             stores[index++] = mockedStore;
         }
@@ -158,7 +158,7 @@ public class StabilityTest {
         AppendOnlyLogStore[] stores = new AppendOnlyLogStore[poolSize];
         int index = 0;
 
-        for (int i = 0; i < quorumSize; i++) {
+        for (int i = 0; i < poolSize; i++) {
             AppendOnlyLogStore mockedStore = mockStore();
 
             doThrow(IOException.class)
@@ -169,17 +169,6 @@ public class StabilityTest {
                     .doAnswer(invocation -> 1L)
                     .when(mockedStore)
                     .put(any(), anyString(), anyString());
-
-            stores[index++] = mockedStore;
-        }
-
-        for (int i = 0; i < (poolSize - quorumSize); i++) {
-            AppendOnlyLogStore mockedStore = mockStore();
-
-            doAnswer(invocation -> {
-                Thread.sleep(Duration.ofSeconds(1));
-                return 1L;
-            }).when(mockedStore).put(any(), anyString(), anyString());
 
             stores[index++] = mockedStore;
         }
@@ -292,14 +281,13 @@ public class StabilityTest {
         for (int i = 0; i < poolSize; i++) {
             AppendOnlyLogStore mockedStore = mockStore();
 
-            doThrow(IOException.class)
-                    .doThrow(IOException.class)
+            doThrow(new IOException("First exception from mock " + i))
+                    .doThrow(new IOException("Second exception from mock " + i))
                     // Quorum not reached -> circuit opens
-                    .doThrow(IOException.class)
-
+                    .doThrow(new IOException("Third exception from mock " + i))
                     // Answers probe with a delay which result in quorum timeout
                     .doAnswer(invocation -> {
-                        Thread.sleep(Duration.ofSeconds(1));
+                        Thread.sleep(Duration.ofSeconds(2));
                         return 1L;
                     })
                     .when(mockedStore)
