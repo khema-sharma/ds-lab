@@ -4,7 +4,6 @@ import java.io.Closeable;
 import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.IOException;
-import java.io.ObjectOutputStream.PutField;
 import java.text.MessageFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -57,11 +56,10 @@ import lab.ds.logstore.replication.ReplicationState;
  */
 public class AppendOnlyLogStore extends AbstractStore implements Closeable {
 
+    static final long MAX_PUT_WAIT_NANOS = TimeUnit.SECONDS.toNanos(2);
+
     private static final Logger logger = LoggerFactory.getLogger(AppendOnlyLogStore.class);
-
     private static final String ERR_IN_INIT = "An error occurred while initializing store: {0}";
-
-    private static final long MAX_PUT_WAIT_NANOS = TimeUnit.SECONDS.toNanos(2);
 
     private final String id;
 
@@ -164,15 +162,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
             throw new IllegalArgumentException("value cannot be blank");
         }
 
-        if (idempotencyKey != null) {
-            Optional<Long> offset = getIdempotentResult(idempotencyKey, key, value);
-
-            if (offset.isPresent()) {
-                return offset.get();
-            }
-        }
-
-        if (forwardToLeader(key, value)) {
+        if (forwardToLeader(idempotencyKey, key, value)) {
             Long index = leader.indexes.get(key);
             return (index != null ? index : Long.MIN_VALUE);
         }
@@ -206,6 +196,8 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
     @Override
     public void close() throws IOException {
         try {
+            logger.info("Shutting down the store...");
+
             replicatorService.shutdownNow();
             writerExecutor.shutdownNow();
 
@@ -315,13 +307,114 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
         return storeReader.readStoreEntryAt(lastOffset);
     }
 
-    private boolean forwardToLeader(String key, String value) throws IOException {
+    long writeRecord(Optional<IdempotencyKey> optionalIdempotencyKey, String key, String value)
+            throws IOException {
+
+        IdempotencyKey idempotencyKey = (optionalIdempotencyKey.isEmpty() ? null : optionalIdempotencyKey.get());
+
+        Future<Long> writeFuture = writerExecutor.submit(() -> writeData(idempotencyKey, key, value));
+
+        try {
+            return writeFuture.get(MAX_PUT_WAIT_NANOS, TimeUnit.NANOSECONDS);
+
+        } catch (InterruptedException e) {
+            logger.error("Store write task was interrupted, write operation could still be running in the background");
+            writeFuture.cancel(true);
+
+            Thread.currentThread().interrupt();
+
+            throw new OperationStateUnknownException(idempotencyKey,
+                    "Interrupted while waiting for the write to complete, status is unknown");
+
+        } catch (TimeoutException e) {
+            logger.error("Store write task was timedout, write operation could still be running in the background");
+            writeFuture.cancel(true);
+
+            throw new OperationStateUnknownException(idempotencyKey,
+                    "Timeout while awaiting write to complete, status is unknown");
+        } catch (ExecutionException e) {
+            Throwable exception = e.getCause();
+
+            if (exception instanceof IOException io) {
+                throw io;
+            } else if (exception instanceof RuntimeException re) {
+                throw re;
+            }
+
+            throw new IOException(e);
+        }
+
+    }
+
+    long writeData(IdempotencyKey idempotencyKey, String key, String value) throws IOException {
+        AtomicReference<PutOperation> atomicOp = PutOperation.newAtomicOperation();
+
+        if (idempotencyKey != null) {
+            Optional<Long> offset = getIdempotentResult(idempotencyKey, key, value);
+
+            if (offset.isPresent()) {
+                return offset.get();
+            }
+
+            idempotentOps.put(idempotencyKey, atomicOp);
+        }
+
+        Throwable throwable = null;
+
+        try {
+            atomicOp.set(new PutOperation(PutOperationState.Running, System.nanoTime(), -1, null));
+
+            if (Thread.currentThread().isInterrupted()) {
+                throw new IllegalStateException("The writer thread was interrupted, backing off");
+            }
+
+            long timestamp = System.currentTimeMillis();
+
+            LogStoreEntrySet storeEntry = insertDataRecord(key, value);
+            LogStoreEntrySet cdcEntry = storeWriter.insertCdcRecord(CdcRecord.TYPE_INSERT,
+                    timestamp, new LogStoreInsertEvent(key, value));
+
+            lastOffset = storeEntry.offset();
+
+            indexes.put(key, lastOffset);
+
+            outboxStore.recordInserted(cdcEntry);
+
+            if (isLeader()) {
+                replicateRecordToFollowers(((DataEntry) storeEntry.entry()).record());
+            }
+
+            return lastOffset;
+
+        } catch (Throwable e) {
+            throwable = e;
+            throw e;
+
+        } finally {
+            long startedAt = atomicOp.get().startedAt();
+
+            if (throwable != null) {
+                atomicOp.set(new PutOperation(PutOperationState.Failed, startedAt, -1, null));
+
+            } else {
+                atomicOp.set(
+                        new PutOperation(PutOperationState.Successful, startedAt, lastOffset,
+                                new DataRecord(key, value)));
+            }
+        }
+    }
+
+    LogStoreEntrySet insertDataRecord(String key, String value) throws IOException {
+        return storeWriter.insertRecord(key, value);
+    }
+
+    private boolean forwardToLeader(IdempotencyKey idempotencyKey, String key, String value) throws IOException {
         if (!isFollower()) {
             return false;
         }
 
         if (!partitioned) {
-            leader.put(key, value);
+            leader.put(idempotencyKey, key, value);
             return true;
         }
 
@@ -358,91 +451,6 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
 
     private void togglePartitioned() {
         partitioned = !partitioned;
-    }
-
-    long writeRecord(Optional<IdempotencyKey> optionalIdempotencyKey, String key, String value)
-            throws IOException {
-
-        IdempotencyKey idempotencyKey = (optionalIdempotencyKey.isPresent() ? optionalIdempotencyKey.get() : null);
-
-        AtomicReference<PutOperation> atomicOp = PutOperation.newAtomicOperation();
-        if (idempotencyKey != null) {
-            idempotentOps.putIfAbsent(idempotencyKey, atomicOp);
-        }
-
-        Future<Long> writeFuture = writerExecutor.submit(() -> {
-            Throwable throwable = null;
-
-            try {
-                atomicOp.set(new PutOperation(PutOperationState.Running, System.nanoTime(), -1, null));
-
-                if (Thread.currentThread().isInterrupted()) {
-                    throw new IllegalStateException("The writer thread was interrupted, backing off");
-                }
-
-                long timestamp = System.currentTimeMillis();
-
-                LogStoreEntrySet storeEntry = storeWriter.insertRecord(key, value);
-                LogStoreEntrySet cdcEntry = storeWriter.insertCdcRecord(CdcRecord.TYPE_INSERT,
-                        timestamp, new LogStoreInsertEvent(key, value));
-
-                lastOffset = storeEntry.offset();
-
-                indexes.put(key, lastOffset);
-
-                outboxStore.recordInserted(cdcEntry);
-
-                if (isLeader()) {
-                    replicateRecordToFollowers(((DataEntry) storeEntry.entry()).record());
-                }
-
-                return lastOffset;
-
-            } catch (Throwable e) {
-                throwable = e;
-                throw e;
-
-            } finally {
-                long startedAt = atomicOp.get().startedAt();
-
-                if (throwable != null) {
-                    atomicOp.set(new PutOperation(PutOperationState.Failed, startedAt, -1, null));
-
-                } else {
-                    atomicOp.set(
-                            new PutOperation(PutOperationState.Successful, startedAt, lastOffset,
-                                    new DataRecord(key, value)));
-                }
-            }
-        });
-
-        try {
-            return writeFuture.get(MAX_PUT_WAIT_NANOS, TimeUnit.NANOSECONDS);
-
-        } catch (InterruptedException e) {
-            writeFuture.cancel(true);
-            Thread.currentThread().interrupt();
-
-            throw new OperationStateUnknownException(idempotencyKey,
-                    "Interrupted while awaiting for the write to complete, status is unknown");
-
-        } catch (TimeoutException e) {
-            writeFuture.cancel(true);
-
-            throw new OperationStateUnknownException(idempotencyKey,
-                    "Timeout while awaiting for the write to complete, status is unknown");
-        } catch (ExecutionException e) {
-            Throwable exception = e.getCause();
-
-            if (exception instanceof IOException io) {
-                throw io;
-            } else if (exception instanceof RuntimeException re) {
-                throw re;
-            }
-
-            throw new IOException(e);
-        }
-
     }
 
     private void initStore(String path) throws StoreInitializationException {
@@ -522,33 +530,30 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
     private Optional<Long> getIdempotentResult(IdempotencyKey idempotencyKey, String key, String value)
             throws OperationStateUnknownException {
 
-        AtomicReference<PutOperation> atomicOp = idempotentOps.compute(idempotencyKey,
-                (k, v) -> (v != null ? idempotentOps.get(idempotencyKey) : null));
-
+        AtomicReference<PutOperation> atomicOp = idempotentOps.get(idempotencyKey);
         if (atomicOp == null) {
             return Optional.empty();
         }
 
         PutOperation putOperation = atomicOp.get();
 
-        if (putOperation.successful()) {
-            if (putOperation.hasRecord(key, value)) {
-                return Optional.of(putOperation.offset());
+        if (putOperation.completed()) {
+            if (putOperation.successful()) {
+                if (putOperation.hasRecord(key, value)) {
+                    return Optional.of(putOperation.offset());
+                }
+
+                throw new IllegalStateException("Given idempotency key is mapped to a different payload.");
             }
-
-            throw new IllegalStateException("Given idempotency key is mapped to a different payload.");
-
-        } else if (putOperation.awaiting() || (putOperation.running() && !operationExpired(putOperation))) {
+        } else if (!putOperation.expired() || !putOperation.awaiting()) {
             throw new OperationStateUnknownException(idempotencyKey,
-                    "An existing put operation is still running, won't take additional request");
+                    "Cannot take a new write until existing write completes.");
         }
 
-        return Optional.empty();
-    }
+        logger.info("Leaked? " + putOperation);
 
-    private boolean operationExpired(PutOperation putOperation) {
-        boolean expired = (System.nanoTime() - putOperation.startedAt() >= MAX_PUT_WAIT_NANOS);
-        return expired;
+        // Failed || (Awaiting && expired)
+        return Optional.empty();
     }
 
     private enum PutOperationState {
@@ -564,16 +569,23 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
             return new AtomicReference<>(new PutOperation(PutOperationState.Awaiting, System.nanoTime(), -1, null));
         }
 
+        public boolean expired() {
+            return (System.nanoTime() - startedAt) >= MAX_PUT_WAIT_NANOS;
+        }
+
         public boolean successful() {
             return state == PutOperationState.Successful;
         }
 
-        public boolean running() {
-            return state == PutOperationState.Running;
-        }
-
         public boolean awaiting() {
             return state == PutOperationState.Awaiting;
+        }
+
+        public boolean completed() {
+            return switch (state) {
+                case Successful, Failed -> true;
+                default -> false;
+            };
         }
 
         public boolean hasRecord(String key, String value) {
