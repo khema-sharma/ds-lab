@@ -4,6 +4,7 @@ import java.io.Closeable;
 import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.IOException;
+import java.io.ObjectOutputStream.PutField;
 import java.text.MessageFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -60,7 +61,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
 
     private static final String ERR_IN_INIT = "An error occurred while initializing store: {0}";
 
-    private static final int MAX_PUT_WAIT_MS = 600;
+    private static final long MAX_PUT_WAIT_NANOS = TimeUnit.SECONDS.toNanos(2);
 
     private final String id;
 
@@ -163,6 +164,14 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
             throw new IllegalArgumentException("value cannot be blank");
         }
 
+        if (idempotencyKey != null) {
+            Optional<Long> offset = getIdempotentResult(idempotencyKey, key, value);
+
+            if (offset.isPresent()) {
+                return offset.get();
+            }
+        }
+
         if (forwardToLeader(key, value)) {
             Long index = leader.indexes.get(key);
             return (index != null ? index : Long.MIN_VALUE);
@@ -200,13 +209,19 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
             replicatorService.shutdownNow();
             writerExecutor.shutdownNow();
 
-            writerExecutor.awaitTermination(MAX_PUT_WAIT_MS, TimeUnit.MILLISECONDS);
+            writerExecutor.awaitTermination(MAX_PUT_WAIT_NANOS, TimeUnit.NANOSECONDS);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         } finally {
-            storeWriter.close();
-            storeReader.close();
-            outboxStore.close();
+            try {
+                storeWriter.close();
+            } finally {
+                try {
+                    storeReader.close();
+                } finally {
+                    outboxStore.close();
+                }
+            }
         }
     }
 
@@ -345,28 +360,14 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
         partitioned = !partitioned;
     }
 
-    private long writeRecord(Optional<IdempotencyKey> optionalIdempotencyKey, String key, String value)
+    long writeRecord(Optional<IdempotencyKey> optionalIdempotencyKey, String key, String value)
             throws IOException {
-        if (optionalIdempotencyKey == null) {
-            throw new IllegalArgumentException(
-                    "Optional idempotencyKey cannot be null, use Optional.empty() if there is no idempotency key in the context of executing this method");
-        }
-
-        if (optionalIdempotencyKey.isPresent() && idempotentOps.containsKey(optionalIdempotencyKey.get())) {
-            Optional<Long> offset = getIdempotentResult(optionalIdempotencyKey, key, value);
-
-            if (offset.isPresent()) {
-                return offset.get();
-            }
-        }
 
         IdempotencyKey idempotencyKey = (optionalIdempotencyKey.isPresent() ? optionalIdempotencyKey.get() : null);
 
-        AtomicReference<PutOperation> atomicOp = new AtomicReference<>(
-                new PutOperation(PutOperationState.Awaiting, System.nanoTime(), -1, null));
-
+        AtomicReference<PutOperation> atomicOp = PutOperation.newAtomicOperation();
         if (idempotencyKey != null) {
-            idempotentOps.put(idempotencyKey, atomicOp);
+            idempotentOps.putIfAbsent(idempotencyKey, atomicOp);
         }
 
         Future<Long> writeFuture = writerExecutor.submit(() -> {
@@ -416,7 +417,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
         });
 
         try {
-            return writeFuture.get(MAX_PUT_WAIT_MS, TimeUnit.MILLISECONDS);
+            return writeFuture.get(MAX_PUT_WAIT_NANOS, TimeUnit.NANOSECONDS);
 
         } catch (InterruptedException e) {
             writeFuture.cancel(true);
@@ -441,6 +442,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
 
             throw new IOException(e);
         }
+
     }
 
     private void initStore(String path) throws StoreInitializationException {
@@ -517,14 +519,16 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
         return LogStoreRole.FOLLOWER.equals(role);
     }
 
-    private Optional<Long> getIdempotentResult(Optional<IdempotencyKey> idempotencyKey, String key, String value)
+    private Optional<Long> getIdempotentResult(IdempotencyKey idempotencyKey, String key, String value)
             throws OperationStateUnknownException {
 
-        if (idempotencyKey.isEmpty()) {
+        AtomicReference<PutOperation> atomicOp = idempotentOps.compute(idempotencyKey,
+                (k, v) -> (v != null ? idempotentOps.get(idempotencyKey) : null));
+
+        if (atomicOp == null) {
             return Optional.empty();
         }
 
-        AtomicReference<PutOperation> atomicOp = idempotentOps.get(idempotencyKey.get());
         PutOperation putOperation = atomicOp.get();
 
         if (putOperation.successful()) {
@@ -534,17 +538,17 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
 
             throw new IllegalStateException("Given idempotency key is mapped to a different payload.");
 
-        } else if (putOperation.running()) {
-            boolean expired = TimeUnit.NANOSECONDS
-                    .toMillis(System.nanoTime() - putOperation.startedAt()) >= MAX_PUT_WAIT_MS;
-
-            if (!expired) {
-                throw new OperationStateUnknownException(idempotencyKey.get(),
-                        "An existing put operation is still running, won't take additional request");
-            }
+        } else if (putOperation.awaiting() || (putOperation.running() && !operationExpired(putOperation))) {
+            throw new OperationStateUnknownException(idempotencyKey,
+                    "An existing put operation is still running, won't take additional request");
         }
 
         return Optional.empty();
+    }
+
+    private boolean operationExpired(PutOperation putOperation) {
+        boolean expired = (System.nanoTime() - putOperation.startedAt() >= MAX_PUT_WAIT_NANOS);
+        return expired;
     }
 
     private enum PutOperationState {
@@ -556,12 +560,20 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
 
     private record PutOperation(PutOperationState state, long startedAt, long offset, DataRecord record) {
 
+        public static AtomicReference<PutOperation> newAtomicOperation() {
+            return new AtomicReference<>(new PutOperation(PutOperationState.Awaiting, System.nanoTime(), -1, null));
+        }
+
         public boolean successful() {
             return state == PutOperationState.Successful;
         }
 
         public boolean running() {
             return state == PutOperationState.Running;
+        }
+
+        public boolean awaiting() {
+            return state == PutOperationState.Awaiting;
         }
 
         public boolean hasRecord(String key, String value) {

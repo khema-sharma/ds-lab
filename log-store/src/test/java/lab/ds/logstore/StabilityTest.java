@@ -7,6 +7,8 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.io.IOException;
@@ -86,6 +88,32 @@ public class StabilityTest {
         }
     }
 
+    @Test 
+    public void rejectsQuorumWithConsecutiveFailures() throws IOException, StoreInitializationException {
+        AppendOnlyLogStore[] stores = new AppendOnlyLogStore[poolSize];
+        
+        for (int i = 0; i < poolSize; i++) {
+            AppendOnlyLogStore mockedStore = mockStore();
+
+            doThrow(IOException.class)
+                .doAnswer(invocation -> 1L)
+                .doThrow(IOException.class)
+                .doThrow(IOException.class)
+                .doThrow(IOException.class)
+                .when(mockedStore).put(any(), anyString(), anyString());
+
+            stores[i] = mockedStore;
+        }
+
+        try (AppendOnlyLogStoreClient storeClient = new AppendOnlyLogStoreClient(stores)) {
+            assertDoesNotThrow(() -> storeClient.put("key-1", "value-1"));
+            // Quorum fails
+            assertThrows(QuorumNotReachedException.class, () -> storeClient.put("key-1", "value-1"));
+            // Quorum rejected
+            assertThrows(StoreBusyException.class, () -> storeClient.put("key-1", "value-1"));
+        }
+    }
+
     @Test
     public void rejectsSlowQuorum() throws IOException, StoreInitializationException {
         int quorumSize = getQuorumSize(poolSize);
@@ -151,9 +179,8 @@ public class StabilityTest {
     }
 
     @Test
-    public void acceptsOpenedToClosedStateTransition()
+    public void acceptsSuccessfulQuorumAfterProbe()
             throws IOException, StoreInitializationException, InterruptedException {
-        int quorumSize = getQuorumSize(poolSize);
 
         AppendOnlyLogStore[] stores = new AppendOnlyLogStore[poolSize];
         int index = 0;

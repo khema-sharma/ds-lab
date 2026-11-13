@@ -2,7 +2,6 @@ package lab.ds.logstore;
 
 import java.io.Closeable;
 import java.io.IOException;
-import java.sql.Time;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -121,7 +120,8 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
             int unknownStateErrors = 0;
             int openCircuitErrors = 0;
 
-            while (successCount < quorumSize && (poolSize - failureCount) >= quorumSize) {
+            while (successCount < quorumSize && (poolSize - failureCount) >= quorumSize
+                    && (successCount + failureCount + unknownStateErrors) < poolSize) {
                 Future<Boolean> futureOp = opCompletionService.poll(deadline - System.nanoTime(), TimeUnit.NANOSECONDS);
 
                 if (futureOp == null) {
@@ -134,12 +134,8 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
                 } else {
                     Throwable executionException = futureOp.exceptionNow();
 
-                    if (executionException instanceof ExecutionException) {
-                        executionException = executionException.getCause();
-                    }
-
                     if (executionException instanceof OperationStateUnknownException) {
-                        // An unknown state is neither counts as a success nor as a failure
+                        // An unknown state can't count toward quorum failures
                         unknownStateErrors++;
                     } else {
                         failureCount++;
@@ -294,7 +290,8 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
         private record RunningPutOperation(CompletableFuture<Long> future, AtomicBoolean started, long since) {
 
             public static RunningPutOperation newCompleteableOperation() {
-                return new RunningPutOperation(new CompletableFuture<Long>(), new AtomicBoolean(false), -1);
+                return new RunningPutOperation(new CompletableFuture<Long>(), new AtomicBoolean(false),
+                        System.nanoTime());
             }
 
             public boolean expired() {
@@ -413,6 +410,7 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
 
         private void probeOnce(IdempotencyKey idempotencyKey, String key, String value)
                 throws CircuitOpenException, IOException {
+
             if (!transitionState(State.HalfOpen, State.Probing)) {
                 logger.error(node.id() + " could not be probed, some other thread has already started the probing");
                 throw new CircuitOpenException(node);
@@ -437,6 +435,7 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
 
                 throw new IOException(e);
             }
+
         }
 
         private void resetCircuit() {
@@ -456,6 +455,8 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
 
             int unknowStateErrors = 0;
             int retries = 0;
+
+            boolean successful = false;
 
             List<Throwable> opExceptions = new ArrayList<>();
             AtomicInteger failures = currentState.get().failures();
@@ -478,6 +479,7 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
                         Long result = getRunningPutOperationResult(runningOperation.get(), idempotencyKey);
 
                         if (result != null) {
+                            successful = true;
                             break;
                         }
                     }
@@ -485,16 +487,19 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
                     runningOperation = Optional.of(RunningPutOperation.newCompleteableOperation());
                     putWithTimeout(runningOperation.get(), idempotencyKey, key, value);
 
+                    successful = true;
                     logger.info(" put operation completed successfully on " + node.id());
+
                     break;
 
                 } catch (IOException e) {
                     if (failures.get() == CIRCUIT_TRIP_THRESHOLD - 1) {
+                        logger.error(" put operation failed on node " + node.id() + ", opening its circuit");
                         transitionState(State.Closed, State.Open);
                     }
 
                     failures.incrementAndGet();
-                    
+
                     opExceptions.add(e);
 
                     switch (e) {
@@ -514,7 +519,8 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
                             runningOperation = Optional.empty();
                             retries++;
                         }
-                    };
+                    }
+                    ;
 
                     if (retries < MAX_RETRIES) {
                         backOffExponentially(retries);
@@ -530,11 +536,7 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
                 }
             } while (retries < MAX_RETRIES && failures.get() < CIRCUIT_TRIP_THRESHOLD);
 
-            if (failures.get() == CIRCUIT_TRIP_THRESHOLD) {
-                logger.error(" put operation failed on node " + node.id() + ", opening its circuit");
-            }
-
-            if (retries == MAX_RETRIES) {
+            if (!successful) {
                 if (unknowStateErrors > 0) {
                     throw new OperationStateUnknownException(idempotencyKey,
                             "Could not detemine the state of the put operation on node " + node.id());
@@ -660,7 +662,8 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
 
                 } catch (Exception e) {
                     switch (e) {
-                        case CancellationException ce -> throw new OperationStateUnknownException(idempotencyKey, ce.getCause());
+                        case CancellationException ce ->
+                            throw new OperationStateUnknownException(idempotencyKey, ce.getCause());
                         default -> throw e;
                     }
                 }
