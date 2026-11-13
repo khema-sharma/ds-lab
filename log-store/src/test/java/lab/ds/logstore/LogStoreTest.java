@@ -4,6 +4,12 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 
 import java.io.IOException;
 import java.io.RandomAccessFile;
@@ -11,6 +17,10 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorCompletionService;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -27,7 +37,7 @@ public class LogStoreTest {
 
     @Test
     public void acceptsValidWrites() throws StoreInitializationException, IOException {
-        try (AppendOnlyLogStore store = new AppendOnlyLogStore()) {
+        try (AppendOnlyLogStore store = newStore()) {
             insertRecords(store, new String[][] { { "key-1", "value-1" }, { "key-2", "value-2" } });
 
             assertEquals("value-1", store.get("key-1"));
@@ -39,7 +49,7 @@ public class LogStoreTest {
     public void acceptsWritesBetweenRestarts() throws StoreInitializationException, IOException {
         String storePath = null;
 
-        try (AppendOnlyLogStore store = new AppendOnlyLogStore()) {
+        try (AppendOnlyLogStore store = newStore()) {
             storePath = store.getPath();
             insertRecords(store, new String[][] { { "key-1", "value-1" } });
         }
@@ -56,7 +66,7 @@ public class LogStoreTest {
     public void rejectsTornWrite() throws StoreInitializationException, IOException {
         String storePath = null;
 
-        try (AppendOnlyLogStore store = new AppendOnlyLogStore()) {
+        try (AppendOnlyLogStore store = newStore()) {
             storePath = store.getPath();
 
             insertRecords(store, new String[][] { { "key-1", "value-1" } });
@@ -70,7 +80,7 @@ public class LogStoreTest {
 
     @Test
     public void acceptsLatestWrite() throws StoreInitializationException, IOException {
-        try (AppendOnlyLogStore store = new AppendOnlyLogStore()) {
+        try (AppendOnlyLogStore store = newStore()) {
             insertRecords(store, new String[][] { { "key-1", "value-1" }, { "key-1", "value-2" } });
             assertEquals("value-2", store.get("key-1"));
         }
@@ -80,7 +90,7 @@ public class LogStoreTest {
     public void acceptsLastCompleteWrite() throws StoreInitializationException, IOException {
         String storePath = null;
 
-        try (AppendOnlyLogStore store = new AppendOnlyLogStore()) {
+        try (AppendOnlyLogStore store = newStore()) {
             storePath = store.getPath();
 
             insertRecords(store, new String[][] { { "key-1", "value-1" }, { "key-1", "value-2" } });
@@ -191,8 +201,8 @@ public class LogStoreTest {
     }
 
     @Test
-    public void ignoresIdempotentWrite() throws StoreInitializationException, IOException {
-        try (AppendOnlyLogStore store = new AppendOnlyLogStore()) {
+    public void ignoresIdempotentWrites() throws StoreInitializationException, IOException {
+        try (AppendOnlyLogStore store = newStore()) {
             IdempotencyKey idempotencyKey = new IdempotencyKey(UUID.randomUUID().toString());
 
             long offset = store.put(idempotencyKey, "key-1", "value-1");
@@ -205,7 +215,7 @@ public class LogStoreTest {
 
     @Test
     public void rejectsInvalidIdempotentWrite() throws StoreInitializationException, IOException {
-        try (AppendOnlyLogStore store = new AppendOnlyLogStore()) {
+        try (AppendOnlyLogStore store = newStore()) {
             IdempotencyKey idempotencyKey = new IdempotencyKey(UUID.randomUUID().toString());
 
             store.put(idempotencyKey, "key-1", "value-1");
@@ -221,7 +231,7 @@ public class LogStoreTest {
     public void rejectsRecordWithoutCDCWrite() throws StoreInitializationException, IOException {
         String storePath = null;
 
-        try (AppendOnlyLogStore store = new AppendOnlyLogStore()) {
+        try (AppendOnlyLogStore store = newStore()) {
             storePath = store.getPath();
 
             insertRecords(store, new String[][] { { "key-1", "value-1" }, { "key-2", "value-2" } });
@@ -281,7 +291,7 @@ public class LogStoreTest {
     @Test
     public void acceptsReadAnomalyWithoutLock()
             throws IOException, StoreInitializationException, InterruptedException {
-        try (AppendOnlyLogStore store = new AppendOnlyLogStore()) {
+        try (AppendOnlyLogStore store = newStore()) {
             store.put("itemsCount", "1");
 
             Thread t1 = newDecrementer(store, false);
@@ -301,9 +311,9 @@ public class LogStoreTest {
     @Test
     public void rejectsReadAnomalyWithLock()
             throws IOException, StoreInitializationException, InterruptedException {
-        try (AppendOnlyLogStore store = new AppendOnlyLogStore()) {
+        try (AppendOnlyLogStore store = newStore()) {
             store.put("itemsCount", "1");
-            
+
             Thread t1 = newDecrementer(store, true);
             Thread t2 = newDecrementer(store, true);
 
@@ -314,6 +324,54 @@ public class LogStoreTest {
             t2.join();
 
             assertEquals("-1", store.get("itemsCount"));
+        }
+    }
+
+    @Test
+    public void rejectsNewIdempotentWritesWhenEarlierSlowWriteIsRunning()
+            throws IOException, StoreInitializationException {
+        try (AppendOnlyLogStore store = newStore()) {
+            AppendOnlyLogStore spyStore = spy(store);
+
+            doAnswer(invocation -> {
+                try {
+                    TimeUnit.NANOSECONDS.sleep(AppendOnlyLogStore.MAX_PUT_WAIT_NANOS);
+                } catch (Throwable th) {
+                }
+                
+                return invocation.callRealMethod();
+            }).when(spyStore).insertDataRecord(anyString(), anyString());
+
+            IdempotencyKey idempotencyKey = new IdempotencyKey("id");
+
+            int iterations = 0;
+            int maxIterations = 1000;
+
+            ExecutorService rougeWriters = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors());
+            ExecutorCompletionService<Void> completionService = new ExecutorCompletionService<>(rougeWriters);
+
+            AtomicInteger completions = new AtomicInteger();
+
+            while (iterations++ < maxIterations) {
+                completionService.submit(() -> {
+                    try {
+                        spyStore.put(idempotencyKey, "key-1", "value-1");
+
+                    } catch (Throwable t) {
+                        // Ignore errors and continue putting records
+                    } finally {
+                        completions.getAndIncrement();
+                    }
+
+                    return null;
+                });
+            }
+
+            while (completions.get() < maxIterations) {
+                completionService.poll();
+            }
+
+            verify(spyStore, times(1)).insertDataRecord(any(), any());
         }
     }
 
@@ -371,5 +429,9 @@ public class LogStoreTest {
             store.put(record[0], record[1]);
         }
     }
-    
+
+    private AppendOnlyLogStore newStore() throws StoreInitializationException {
+        return new AppendOnlyLogStore();
+    }
+
 }

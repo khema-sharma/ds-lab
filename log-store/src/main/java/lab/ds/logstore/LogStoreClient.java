@@ -16,16 +16,26 @@ public interface LogStoreClient {
      * @param key
      * @param value
      */
-    public void put(String key, String value) throws IOException;
+    public void put(String key, String value) throws RetryableStoreException;
 
     /**
+     * Saves the key-value pair (record) on the quorum
      * 
-     * @param idempotencyKey
-     * @param key
-     * @param value
-     * @throws IOException
+     * <p>
+     * If the put operation is successful then it is guaranteed that the key-value
+     * pair has been saved successfully in the nodes which participated in the
+     * quorum. There is no guarantee on the remaining nodes, so a read may return a
+     * stale value if it reaches a node on which put failed.
+     * 
+     * <p>
+     * If the put operation fails for any reason then the caller must call this
+     * method again with the same idempotency key. This ensures that the record gets
+     * saved only if it was not previously saved.
+     * 
+     * @throws RetryableStoreException if there were issues in writing the
+     *                                 key-value pair
      */
-    public void put(IdempotencyKey idempotencyKey, String key, String value) throws IOException;
+    public void put(IdempotencyKey idempotencyKey, String key, String value) throws RetryableStoreException;
 
     /**
      * 
