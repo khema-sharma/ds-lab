@@ -377,6 +377,26 @@ public class LogStoreTest {
         }
     }
 
+    @Test
+    public void acceptsCleanedUpPutTask() throws IOException, StoreInitializationException, InterruptedException {
+        try (AppendOnlyLogStore store = newStore()) {
+            IdempotencyKey idempotencyKey = new IdempotencyKey("id");
+            IdempotencyKey idempotencyKey2 = new IdempotencyKey("id2");
+
+            store.put(idempotencyKey, "key-1", "value-1");
+            store.put(idempotencyKey2, "key-2", "value-2");
+            
+            assertEquals(true, store.holdsIdempotencyResult(idempotencyKey));
+            assertEquals(true, store.holdsIdempotencyResult(idempotencyKey2));
+
+            store.internalExpireWriteTasks();
+            store.cleanExpiredWriteTasks();
+
+            assertEquals(false, store.holdsIdempotencyResult(idempotencyKey));
+            assertEquals(false, store.holdsIdempotencyResult(idempotencyKey2));
+        }
+    }
+
     private Thread newDecrementer(AppendOnlyLogStore store, boolean lockKey) {
         return new Thread() {
             public void run() {

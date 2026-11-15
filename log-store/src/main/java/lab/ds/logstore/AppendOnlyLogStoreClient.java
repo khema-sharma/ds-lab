@@ -364,16 +364,17 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
          * 
          * In each retry loop iteration, the store's put is executed asynchronously,
          * guarded by a timeout (1 second in its current form). If the call does not
-         * complete within this stipulated deadline then it is kept running in the
-         * background and the retry loop continues without accounting it as rerty. The
-         * background put task is kept alive for a certain period (3 secs in its current
-         * form). In each following iteration the background task status is checked. If
-         * it has completed successfully then its results are returned, if it has failed
-         * then the iteration is marked as failure and depending on number of failures,
-         * the retry loop either continues to next iteration or fails. If the task is
-         * not yet complete but if it has expired then it gets canceled.
+         * complete within this stipulated deadline then it attempts to cancel it. If
+         * the put has reached to a point where it cannot be backtracked then it will
+         * finish in the background. The background put task is kept alive for a certain
+         * period (3 secs in its current form). In each following iteration the
+         * background task status is checked. If it has completed successfully then its
+         * results are returned, if it has failed then the iteration is marked as
+         * failure and depending on number of failures, the retry loop either continues
+         * to next iteration or fails. If the task is not yet complete but if it has
+         * expired then it gets canceled.
          * 
-         * Each iteration waits for a jittered random period before contuing.
+         * Each iteration waits for a jittered random period before continuing.
          * 
          * @param idempotencyKey
          * @param key
@@ -493,12 +494,10 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
                     break;
 
                 } catch (IOException e) {
-                    if (failures.get() == CIRCUIT_TRIP_THRESHOLD - 1) {
+                    if (failures.incrementAndGet() >= CIRCUIT_TRIP_THRESHOLD) {
                         logger.error(" put operation failed on node " + node.id() + ", opening its circuit");
                         transitionState(State.Closed, State.Open);
                     }
-
-                    failures.incrementAndGet();
 
                     opExceptions.add(e);
 
