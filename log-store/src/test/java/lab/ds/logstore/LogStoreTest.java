@@ -10,6 +10,7 @@ import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 import java.io.IOException;
 import java.io.RandomAccessFile;
@@ -330,48 +331,49 @@ public class LogStoreTest {
     @Test
     public void rejectsNewIdempotentWritesWhenEarlierSlowWriteIsRunning()
             throws IOException, StoreInitializationException {
-        try (AppendOnlyLogStore store = newStore()) {
-            AppendOnlyLogStore spyStore = spy(store);
+        try (ExecutorService rougeWriters = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors())) {
+            try (AppendOnlyLogStore store = newStore()) {
+                AppendOnlyLogStore spyStore = spy(store);
 
-            doAnswer(invocation -> {
-                try {
-                    TimeUnit.NANOSECONDS.sleep(AppendOnlyLogStore.MAX_PUT_WAIT_NANOS);
-                } catch (Throwable th) {
-                }
-                
-                return invocation.callRealMethod();
-            }).when(spyStore).insertDataRecord(anyString(), anyString());
-
-            IdempotencyKey idempotencyKey = new IdempotencyKey("id");
-
-            int iterations = 0;
-            int maxIterations = 1000;
-
-            ExecutorService rougeWriters = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors());
-            ExecutorCompletionService<Void> completionService = new ExecutorCompletionService<>(rougeWriters);
-
-            AtomicInteger completions = new AtomicInteger();
-
-            while (iterations++ < maxIterations) {
-                completionService.submit(() -> {
+                doAnswer(invocation -> {
                     try {
-                        spyStore.put(idempotencyKey, "key-1", "value-1");
-
-                    } catch (Throwable t) {
-                        // Ignore errors and continue putting records
-                    } finally {
-                        completions.getAndIncrement();
+                        TimeUnit.NANOSECONDS.sleep(AppendOnlyLogStore.MAX_PUT_WAIT_NANOS);
+                    } catch (Throwable th) {
                     }
 
-                    return null;
-                });
-            }
+                    return invocation.callRealMethod();
+                }).when(spyStore).insertDataRecord(anyString(), anyString());
 
-            while (completions.get() < maxIterations) {
-                completionService.poll();
-            }
+                IdempotencyKey idempotencyKey = new IdempotencyKey("id");
 
-            verify(spyStore, times(1)).insertDataRecord(any(), any());
+                int iterations = 0;
+                int maxIterations = 1000;
+
+                ExecutorCompletionService<Void> completionService = new ExecutorCompletionService<>(rougeWriters);
+
+                AtomicInteger completions = new AtomicInteger();
+
+                while (iterations++ < maxIterations) {
+                    completionService.submit(() -> {
+                        try {
+                            spyStore.put(idempotencyKey, "key-1", "value-1");
+
+                        } catch (Throwable t) {
+                            // Ignore errors and continue putting records
+                        } finally {
+                            completions.getAndIncrement();
+                        }
+
+                        return null;
+                    });
+                }
+
+                while (completions.get() < maxIterations) {
+                    completionService.poll();
+                }
+
+                verify(spyStore, times(1)).insertDataRecord(any(), any());
+            }
         }
     }
 

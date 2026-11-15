@@ -58,7 +58,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
 
     static final long MAX_PUT_WAIT_NANOS = TimeUnit.SECONDS.toNanos(2);
 
-    private static final Logger logger = LoggerFactory.getLogger(AppendOnlyLogStore.class);
+    private static final Logger logger = LoggerFactory.getLogger(AppendOnlyLogStore.class.getSimpleName());
     private static final String ERR_IN_INIT = "An error occurred while initializing store: {0}";
 
     private final String id;
@@ -162,14 +162,19 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
             throw new IllegalArgumentException("value cannot be blank");
         }
 
-        if (forwardToLeader(idempotencyKey, key, value)) {
-            Long index = leader.indexes.get(key);
-            return (index != null ? index : Long.MIN_VALUE);
+        if (isFollower()) {
+            return forwardToLeader(idempotencyKey, key, value);
         }
 
         checkFencingTerm();
 
-        return writeRecord(Optional.ofNullable(idempotencyKey), key, value);
+        LogStoreEntrySet entrySet = writeRecord(Optional.ofNullable(idempotencyKey), key, value);
+
+        if (isLeader()) {
+            replicateRecordToFollowers((DataRecord) entrySet.entry().record());
+        }
+
+        return entrySet.offset();
     }
 
     @Override
@@ -307,12 +312,12 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
         return storeReader.readStoreEntryAt(lastOffset);
     }
 
-    long writeRecord(Optional<IdempotencyKey> optionalIdempotencyKey, String key, String value)
+    LogStoreEntrySet writeRecord(Optional<IdempotencyKey> optionalIdempotencyKey, String key, String value)
             throws IOException {
 
         IdempotencyKey idempotencyKey = (optionalIdempotencyKey.isEmpty() ? null : optionalIdempotencyKey.get());
 
-        Future<Long> writeFuture = writerExecutor.submit(() -> writeData(idempotencyKey, key, value));
+        Future<LogStoreEntrySet> writeFuture = writerExecutor.submit(() -> writeData(idempotencyKey, key, value));
 
         try {
             return writeFuture.get(MAX_PUT_WAIT_NANOS, TimeUnit.NANOSECONDS);
@@ -327,7 +332,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
                     "Interrupted while waiting for the write to complete, status is unknown");
 
         } catch (TimeoutException e) {
-            logger.error("Store write task was timedout, write operation could still be running in the background");
+            logger.error("Store write task timed out, write operation could still be running in the background");
             writeFuture.cancel(true);
 
             throw new OperationStateUnknownException(idempotencyKey,
@@ -346,14 +351,16 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
 
     }
 
-    long writeData(IdempotencyKey idempotencyKey, String key, String value) throws IOException {
+    LogStoreEntrySet writeData(IdempotencyKey idempotencyKey, String key, String value) throws IOException {
+        logger.info("Starting to write data...");
+
         AtomicReference<PutOperation> atomicOp = PutOperation.newAtomicOperation();
 
         if (idempotencyKey != null) {
-            Optional<Long> offset = getIdempotentResult(idempotencyKey, key, value);
+            Optional<LogStoreEntrySet> entrySet = getIdempotentResult(idempotencyKey, key, value);
 
-            if (offset.isPresent()) {
-                return offset.get();
+            if (entrySet.isPresent()) {
+                return entrySet.get();
             }
 
             idempotentOps.put(idempotencyKey, atomicOp);
@@ -361,8 +368,11 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
 
         Throwable throwable = null;
 
+        LogStoreEntrySet storeEntry = null;
+        LogStoreEntrySet cdcEntry = null;
+
         try {
-            atomicOp.set(new PutOperation(PutOperationState.Running, System.nanoTime(), -1, null));
+            atomicOp.set(new PutOperation(PutOperationState.Running, System.nanoTime(), null));
 
             if (Thread.currentThread().isInterrupted()) {
                 throw new IllegalStateException("The writer thread was interrupted, backing off");
@@ -370,8 +380,8 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
 
             long timestamp = System.currentTimeMillis();
 
-            LogStoreEntrySet storeEntry = insertDataRecord(key, value);
-            LogStoreEntrySet cdcEntry = storeWriter.insertCdcRecord(CdcRecord.TYPE_INSERT,
+            storeEntry = insertDataRecord(key, value);
+            cdcEntry = storeWriter.insertCdcRecord(CdcRecord.TYPE_INSERT,
                     timestamp, new LogStoreInsertEvent(key, value));
 
             lastOffset = storeEntry.offset();
@@ -380,11 +390,7 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
 
             outboxStore.recordInserted(cdcEntry);
 
-            if (isLeader()) {
-                replicateRecordToFollowers(((DataEntry) storeEntry.entry()).record());
-            }
-
-            return lastOffset;
+            return storeEntry;
 
         } catch (Throwable e) {
             throwable = e;
@@ -392,14 +398,14 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
 
         } finally {
             long startedAt = atomicOp.get().startedAt();
+            boolean insertSuccessful = (storeEntry != null && cdcEntry != null);
 
-            if (throwable != null) {
-                atomicOp.set(new PutOperation(PutOperationState.Failed, startedAt, -1, null));
+            if (throwable == null || insertSuccessful) {
+                atomicOp.set(
+                        new PutOperation(PutOperationState.Successful, startedAt, storeEntry));
 
             } else {
-                atomicOp.set(
-                        new PutOperation(PutOperationState.Successful, startedAt, lastOffset,
-                                new DataRecord(key, value)));
+                atomicOp.set(new PutOperation(PutOperationState.Failed, startedAt, null));
             }
         }
     }
@@ -408,14 +414,9 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
         return storeWriter.insertRecord(key, value);
     }
 
-    private boolean forwardToLeader(IdempotencyKey idempotencyKey, String key, String value) throws IOException {
-        if (!isFollower()) {
-            return false;
-        }
-
+    private long forwardToLeader(IdempotencyKey idempotencyKey, String key, String value) throws IOException {
         if (!partitioned) {
-            leader.put(idempotencyKey, key, value);
-            return true;
+            return leader.put(idempotencyKey, key, value);
         }
 
         throw new IllegalStateException("ERR-PART: Unable to write value.");
@@ -527,8 +528,8 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
         return LogStoreRole.FOLLOWER.equals(role);
     }
 
-    private Optional<Long> getIdempotentResult(IdempotencyKey idempotencyKey, String key, String value)
-            throws OperationStateUnknownException {
+    private Optional<LogStoreEntrySet> getIdempotentResult(IdempotencyKey idempotencyKey, String key, String value)
+            throws PendingPutOperationException {
 
         AtomicReference<PutOperation> atomicOp = idempotentOps.get(idempotencyKey);
         if (atomicOp == null) {
@@ -537,36 +538,40 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
 
         PutOperation putOperation = atomicOp.get();
 
+        logger.info(putOperation.toString());
+
         if (putOperation.completed()) {
             if (putOperation.successful()) {
                 if (putOperation.hasRecord(key, value)) {
-                    return Optional.of(putOperation.offset());
+                    return Optional.of(putOperation.entrySet());
                 }
 
                 throw new IllegalStateException("Given idempotency key is mapped to a different payload.");
             }
-        } else if (!putOperation.expired() || !putOperation.awaiting()) {
-            throw new OperationStateUnknownException(idempotencyKey,
+        } else if (putOperation.running()) {
+            if (putOperation.expired()) {
+                idempotentOps.remove(idempotencyKey);
+                throw new IllegalStateException(
+                        "The put call with idempotency key " + idempotencyKey.key() + " expired while still running.");
+            }
+
+            throw new PendingPutOperationException(idempotencyKey,
                     "Cannot take a new write until existing write completes.");
         }
 
-        logger.info("Leaked? " + putOperation);
-
-        // Failed || (Awaiting && expired)
         return Optional.empty();
     }
 
     private enum PutOperationState {
-        Awaiting,
         Running,
         Successful,
         Failed
     }
 
-    private record PutOperation(PutOperationState state, long startedAt, long offset, DataRecord record) {
+    private record PutOperation(PutOperationState state, long startedAt, LogStoreEntrySet entrySet) {
 
         public static AtomicReference<PutOperation> newAtomicOperation() {
-            return new AtomicReference<>(new PutOperation(PutOperationState.Awaiting, System.nanoTime(), -1, null));
+            return new AtomicReference<>(new PutOperation(PutOperationState.Running, System.nanoTime(), null));
         }
 
         public boolean expired() {
@@ -577,8 +582,8 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
             return state == PutOperationState.Successful;
         }
 
-        public boolean awaiting() {
-            return state == PutOperationState.Awaiting;
+        public boolean running() {
+            return state == PutOperationState.Running;
         }
 
         public boolean completed() {
@@ -589,7 +594,11 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
         }
 
         public boolean hasRecord(String key, String value) {
-            return key.equals(record.key()) && value.equals(record.value());
+            return (entrySet != null && key.equals(dataRecord().key()) && value.equals(dataRecord().value()));
+        }
+
+        public DataRecord dataRecord() {
+            return (DataRecord) entrySet.entry().record();
         }
 
     }

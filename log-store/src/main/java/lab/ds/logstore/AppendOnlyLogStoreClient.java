@@ -365,7 +365,7 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
          * In each retry loop iteration, the store's put is executed asynchronously,
          * guarded by a timeout (1 second in its current form). If the call does not
          * complete within this stipulated deadline then it is kept running in the
-         * background and the retry loop continues without accounting it as rertyß. The
+         * background and the retry loop continues without accounting it as rerty. The
          * background put task is kept alive for a certain period (3 secs in its current
          * form). In each following iteration the background task status is checked. If
          * it has completed successfully then its results are returned, if it has failed
@@ -589,7 +589,7 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
                         " timeout in node " + node.id() + "'s put");
 
                 opFuture.cancel(true);
-                throw new PendingPutOperationException("Timeout awaiting response from the store.");
+                throw new PendingPutOperationException(idempotencyKey, "Timeout awaiting response from the store.");
 
             } catch (ExecutionException e) {
                 if (e.getCause() instanceof IOException io) {
@@ -653,7 +653,7 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
             if (runningOp.started().get() && !completablePut.isDone() && !runningOp.expired()) {
                 logger.info(" rejected the retry, allowing previous attempt to complete");
 
-                throw new PendingPutOperationException(
+                throw new PendingPutOperationException(idempotencyKey,
                         "Won't submit a new put task until the existing one completes");
 
             } else if (completablePut.isDone()) {

@@ -1,11 +1,11 @@
 package lab.ds.logstore;
 
-import java.io.IOException;
+import lab.ds.logstore.core.IdempotencyKey;
 
-public class PendingPutOperationException extends IOException {
+public class PendingPutOperationException extends RetryableStoreException {
 
-    public PendingPutOperationException(String message) {
-        super(message);
+    public PendingPutOperationException(IdempotencyKey idempotencyKey, String message) {
+        super(idempotencyKey, message);
     }
 
 }
