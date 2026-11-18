@@ -9,6 +9,7 @@ import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorCompletionService;
@@ -120,6 +121,8 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
             int unknownStateErrors = 0;
             int openCircuitErrors = 0;
 
+            List<Throwable> causes = new ArrayList<>();
+
             while (successCount < quorumSize && (poolSize - failureCount) >= quorumSize
                     && (successCount + failureCount + unknownStateErrors) < poolSize) {
                 Future<Boolean> futureOp = opCompletionService.poll(deadline - System.nanoTime(), TimeUnit.NANOSECONDS);
@@ -133,6 +136,8 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
                     successCount++;
                 } else {
                     Throwable executionException = futureOp.exceptionNow();
+
+                    causes.add(executionException);
 
                     if (executionException instanceof OperationStateUnknownException) {
                         // An unknown state can't count toward quorum failures
@@ -159,7 +164,7 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
                     throw new StoreBusyException(idempotencyKey);
                 }
 
-                throw new QuorumNotReachedException(idempotencyKey, "Failed to save record");
+                throw new QuorumNotReachedException(idempotencyKey, "Failed to save record", causes);
             }
 
             logger.info(" put operation on the quorum was successful");
@@ -340,23 +345,18 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
          * This method's execution path varies depending on the node's circuit state
          * (Closed/Opened/Half Opened</b>).
          * <br/>
-         * <b>Closed:</b>
-         * <p>
-         * If circuit is closed then it calls store's put method from inside a retry
-         * loop (3 iterations in its current shape). Failure repeats the iteration,
-         * whereas a success will immediately return. If the retry loop exhausts,
-         * because each attempt failed, then the circuit gets opened.
+         * <b>Closed</b>: If circuit is closed then it calls store's put method from
+         * inside a retry loop (3 iterations in its current shape). Failure repeats the
+         * iteration, whereas a success will immediately return. If the retry loop
+         * exhausts, because each attempt failed, then the circuit gets opened.
          *
-         * <b>Open:</b>
-         * 
-         * If the circuit is open then there is no retry loop. The method simply throws
+         * <b>Open</b>: If the circuit is open then there is no retry loop. The method
+         * simply throws
          * {@code CircuitOpenException} immediately.
          * 
-         * <b>Half-open:</b>
-         * 
-         * It the circuit is half-open then it tries to move to probing state. If it
-         * fails (because some other put is currently probing) then it throws
-         * {@code CircuitOpenException}. If it succeeds in moving
+         * <b>Half-open</b>: It the circuit is half-open then it tries to move to
+         * probing state. If it fails (because some other put is currently probing) then
+         * it throws {@code CircuitOpenException}. If it succeeds in moving
          * to probing state then it calls the store's put method once. If call succeeds
          * then the circuit gets closed else it gets opened again.
          * 
@@ -364,15 +364,17 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
          * 
          * In each retry loop iteration, the store's put is executed asynchronously,
          * guarded by a timeout (1 second in its current form). If the call does not
-         * complete within this stipulated deadline then it attempts to cancel it. If
-         * the put has reached to a point where it cannot be backtracked then it will
-         * finish in the background. The background put task is kept alive for a certain
-         * period (3 secs in its current form). In each following iteration the
-         * background task status is checked. If it has completed successfully then its
-         * results are returned, if it has failed then the iteration is marked as
-         * failure and depending on number of failures, the retry loop either continues
-         * to next iteration or fails. If the task is not yet complete but if it has
-         * expired then it gets canceled.
+         * complete within this stipulated deadline then it does not increment retry
+         * counter, but it counts towards the circuit trip threshold, and the retry loop
+         * continues. In each iteration that follow, status of the background task is
+         * checked. Depending on the status, one of the following happens:
+         * 
+         * <b>task succeeds</b>: result of the background task is
+         * returned and the retry loop ends<br/>
+         * <b>task fails</b>: the iteration is marked as failure, retry counter is
+         * incremented and a new put is attempted<br/>
+         * <b>task running</b>: if an extended dealine (3 seconds in its current
+         * form) has been breached then it is considered as failed<br/>
          * 
          * Each iteration waits for a jittered random period before continuing.
          * 
@@ -384,7 +386,7 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
          */
         public void put(IdempotencyKey idempotencyKey, String key, String value)
                 throws CircuitOpenException, IOException {
-            logger.info(" attempting put on " + node.id() + "...");
+            logger.info(" performing put on " + node.id() + "...");
 
             switch (currentState.get().state()) {
                 case Open, Probing -> throw new CircuitOpenException(node);
@@ -481,21 +483,23 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
 
                         if (result != null) {
                             successful = true;
-                            break;
                         }
+                    } else {
+                        runningOperation = Optional.of(RunningPutOperation.newCompleteableOperation());
+                        putWithTimeout(runningOperation.get(), idempotencyKey, key, value);
+
+                        successful = true;
+
+                        logger.info("  put attempt(" + retries + ") completed successfully on " + node.id());
                     }
 
-                    runningOperation = Optional.of(RunningPutOperation.newCompleteableOperation());
-                    putWithTimeout(runningOperation.get(), idempotencyKey, key, value);
-
-                    successful = true;
-                    logger.info(" put operation completed successfully on " + node.id());
-
+                    failures.set(0);
                     break;
 
                 } catch (IOException e) {
                     if (failures.incrementAndGet() >= CIRCUIT_TRIP_THRESHOLD) {
-                        logger.error(" put operation failed on node " + node.id() + ", opening its circuit");
+                        logger.error("  put operation failed on node " + node.id() + ", opening its circuit");
+
                         transitionState(State.Closed, State.Open);
                     }
 
@@ -519,19 +523,18 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
                             retries++;
                         }
                     }
-                    ;
 
                     if (retries < MAX_RETRIES) {
                         backOffExponentially(retries);
                     }
-                } catch (CircuitOpenException e) {
+                } catch (CircuitOpenException | IllegalArgumentException | IllegalStateException e) {
                     throw e;
 
                 } catch (RuntimeException e) {
                     transitionState(State.Closed, State.Open);
 
                     throw new OperationStateUnknownException(idempotencyKey,
-                            "Could not detemine the state of the put operation on node " + node.id());
+                            "Could not detemine the state of the put operation on node " + node.id(), e);
                 }
             } while (retries < MAX_RETRIES && failures.get() < CIRCUIT_TRIP_THRESHOLD);
 
@@ -546,7 +549,7 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
             }
         }
 
-        private long putWithTimeout(RunningPutOperation runningPut, IdempotencyKey idempotencyKey,
+        long putWithTimeout(RunningPutOperation runningPut, IdempotencyKey idempotencyKey,
                 String key, String value) throws IOException {
 
             runningPut.start();
@@ -663,6 +666,13 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
                     switch (e) {
                         case CancellationException ce ->
                             throw new OperationStateUnknownException(idempotencyKey, ce.getCause());
+                        case CompletionException ce -> {
+                            if (ce.getCause() instanceof IOException) {
+                                throw (IOException) ce.getCause();
+                            }
+
+                            throw new OperationStateUnknownException(idempotencyKey, ce);
+                        }
                         default -> throw e;
                     }
                 }

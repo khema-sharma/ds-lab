@@ -10,7 +10,6 @@ import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
 
 import java.io.IOException;
 import java.io.RandomAccessFile;
@@ -330,7 +329,7 @@ public class LogStoreTest {
 
     @Test
     public void rejectsNewIdempotentWritesWhenEarlierSlowWriteIsRunning()
-            throws IOException, StoreInitializationException {
+            throws IOException, StoreInitializationException, InterruptedException {
         try (ExecutorService rougeWriters = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors())) {
             try (AppendOnlyLogStore store = newStore()) {
                 AppendOnlyLogStore spyStore = spy(store);
@@ -369,7 +368,7 @@ public class LogStoreTest {
                 }
 
                 while (completions.get() < maxIterations) {
-                    completionService.poll();
+                    completionService.take();
                 }
 
                 verify(spyStore, times(1)).insertDataRecord(any(), any());
@@ -378,7 +377,7 @@ public class LogStoreTest {
     }
 
     @Test
-    public void acceptsCleanedUpPutTask() throws IOException, StoreInitializationException, InterruptedException {
+    public void acceptsCleanedUpPutTasks() throws IOException, StoreInitializationException, InterruptedException {
         try (AppendOnlyLogStore store = newStore()) {
             IdempotencyKey idempotencyKey = new IdempotencyKey("id");
             IdempotencyKey idempotencyKey2 = new IdempotencyKey("id2");
@@ -390,7 +389,7 @@ public class LogStoreTest {
             assertEquals(true, store.holdsIdempotencyResult(idempotencyKey2));
 
             store.internalExpireWriteTasks();
-            store.cleanExpiredWriteTasks();
+            store.cleanExpiredIdempotentPutTasks();
 
             assertEquals(false, store.holdsIdempotencyResult(idempotencyKey));
             assertEquals(false, store.holdsIdempotencyResult(idempotencyKey2));

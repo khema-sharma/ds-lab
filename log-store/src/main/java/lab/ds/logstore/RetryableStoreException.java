@@ -22,6 +22,11 @@ public class RetryableStoreException extends IOException {
         idempotencyKey = key;
     }
 
+    public RetryableStoreException(IdempotencyKey key, String message, Throwable cause) {
+        super(message, cause);
+        idempotencyKey = key;
+    }
+
     public IdempotencyKey idempotencyKey() {
         return idempotencyKey;
     }

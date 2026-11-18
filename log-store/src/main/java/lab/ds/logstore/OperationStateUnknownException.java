@@ -11,5 +11,9 @@ public class OperationStateUnknownException extends RetryableStoreException {
     public OperationStateUnknownException(IdempotencyKey key, String message) {
         super(key, message);
     }
+
+    public OperationStateUnknownException(IdempotencyKey key, String message, Throwable cause) {
+        super(key, message, cause);
+    }
     
 }

@@ -6,10 +6,10 @@ import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.text.MessageFormat;
 import java.util.HashSet;
-import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Map.Entry;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -20,6 +20,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicReference;
@@ -144,8 +145,14 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
         // Unbounded single thread that execute a write task
         writerExecutor = Executors.newSingleThreadExecutor();
 
-        writeTasksCleaner = Executors.newSingleThreadScheduledExecutor();
-        writeTasksCleaner.schedule(() -> cleanExpiredWriteTasks(), MAX_PUT_TASK_EXPIRY_SEC, TimeUnit.SECONDS);
+        writeTasksCleaner = Executors.newSingleThreadScheduledExecutor(runnable -> {
+            Thread cleaner = new Thread(runnable, "write-tasks-cleaner");
+            cleaner.setDaemon(true);
+
+            return cleaner;
+        });
+        writeTasksCleaner.scheduleWithFixedDelay(() -> cleanExpiredIdempotentPutTasks(), MAX_PUT_TASK_EXPIRY_SEC,
+                MAX_PUT_TASK_EXPIRY_SEC, TimeUnit.SECONDS);
 
         lastOffset = 0;
         buildIndexes();
@@ -164,6 +171,10 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
 
     @Override
     public long put(IdempotencyKey idempotencyKey, String key, String value) throws IOException {
+        if (idempotencyKey != null && (idempotencyKey.key() == null || idempotencyKey.key().isBlank())) {
+            throw new IllegalArgumentException("Idempotency key cannot be blank.");
+        }
+
         if (key == null || key.isBlank()) {
             throw new IllegalArgumentException("key cannot be blank.");
         }
@@ -204,24 +215,26 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
 
     @Override
     public void close() throws IOException {
+        logger.info("Shutting down the store...");
+
+        ExecutorService[] services = new ExecutorService[] { replicatorService, writerExecutor, writeTasksCleaner };
+        Closeable[] closeables = new Closeable[] { storeReader, storeWriter, outboxStore };
+
+        for (ExecutorService service : services) {
+            service.shutdownNow();
+        }
+
         try {
-            logger.info("Shutting down the store...");
-
-            replicatorService.shutdownNow();
-            writerExecutor.shutdownNow();
-
             writerExecutor.awaitTermination(MAX_PUT_WAIT_NANOS, TimeUnit.NANOSECONDS);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-        } finally {
+        }
+
+        for (Closeable closeable : closeables) {
             try {
-                storeWriter.close();
-            } finally {
-                try {
-                    storeReader.close();
-                } finally {
-                    outboxStore.close();
-                }
+                closeable.close();
+            } catch (IOException e) {
+                logger.error("An error occurred while trying to close the store", e);
             }
         }
     }
@@ -315,8 +328,9 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
     void internalExpireWriteTasks() {
         idempotentOps.forEach((k, v) -> {
             PutOperation existingOp = v.get();
-            v.set(new PutOperation(existingOp.state(),
-                    existingOp.startedAt() - TimeUnit.SECONDS.toNanos(MAX_PUT_TASK_EXPIRY_SEC), existingOp.entrySet()));
+            v.set(new PutOperation(existingOp.state(), existingOp.startedAt(),
+                    System.nanoTime() - TimeUnit.SECONDS.toNanos(MAX_PUT_TASK_EXPIRY_SEC),
+                    existingOp.entrySet()));
         });
     }
 
@@ -414,10 +428,10 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
 
             if (throwable == null || insertSuccessful) {
                 atomicOp.set(
-                        new PutOperation(PutOperationState.Successful, startedAt, storeEntry));
+                        new PutOperation(PutOperationState.Successful, startedAt, System.nanoTime(), storeEntry));
 
             } else {
-                atomicOp.set(new PutOperation(PutOperationState.Failed, startedAt, null));
+                atomicOp.set(new PutOperation(PutOperationState.Failed, startedAt, System.nanoTime(), null));
             }
         }
     }
@@ -430,29 +444,35 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
         return idempotentOps.containsKey(key);
     }
 
-    void cleanExpiredWriteTasks() {
-        Iterator<IdempotencyKey> opsIterator = idempotentOps.keySet().iterator();
-        Set<String> cleanedUpKeys = new HashSet<>();
+    void cleanExpiredIdempotentPutTasks() {
+        try {
+            Set<String> cleanedUpKeys = new HashSet<>();
 
-        while (opsIterator.hasNext()) {
-            IdempotencyKey key = opsIterator.next();
+            idempotentOps.entrySet()
+                    .removeIf(entry -> idempotentPutExpired(entry.getKey(), entry.getValue().get(), cleanedUpKeys));
 
-            AtomicReference<PutOperation> atomicPut = idempotentOps.get(key);
-            boolean expired = (TimeUnit.NANOSECONDS
-                    .toSeconds(System.nanoTime() - atomicPut.get().startedAt()) >= MAX_PUT_TASK_EXPIRY_SEC);
-
-            if (expired) {
-                cleanedUpKeys.add(key.key());
-                opsIterator.remove();
+            logger.debug("Cleaned up " + cleanedUpKeys.size() + " key(s)");
+            if (!cleanedUpKeys.isEmpty() && logger.isTraceEnabled()) {
+                logger.trace("Following keys were cleaned up: " + String.join(",", cleanedUpKeys));
             }
+        } catch (RuntimeException e) {
+            logger.error("An error occurred while cleaning expired write tasks", e);
+        }
+    }
+
+    private boolean idempotentPutExpired(IdempotencyKey key, PutOperation putOp, Set<String> cleanedUpKeys) {
+        if (putOp.state().equals(PutOperationState.Running)) {
+            return false;
         }
 
-        logger.info("Cleaned up " + cleanedUpKeys.size() + " key(s)");
+        long deadline = putOp.completedAt() + TimeUnit.SECONDS.toNanos(MAX_PUT_TASK_EXPIRY_SEC);
+        boolean expired = (deadline <= System.nanoTime());
 
-        if (!cleanedUpKeys.isEmpty()) {
-            logger.trace("Following keys were cleaned up: "
-                    + cleanedUpKeys.stream().reduce((acc, key) -> acc += (", " + key)).get());
+        if (expired) {
+            cleanedUpKeys.add(key.key());
         }
+
+        return expired;
     }
 
     private long forwardToLeader(IdempotencyKey idempotencyKey, String key, String value) throws IOException {
@@ -579,18 +599,12 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
 
         PutOperation putOperation = atomicOp.get();
 
-        if (putOperation.completed()) {
-            if (putOperation.successful()) {
-                if (putOperation.hasRecord(key, value)) {
-                    return Optional.of(putOperation.entrySet());
-                }
-
-                throw new IllegalStateException("Given idempotency key is mapped to a different payload.");
-
-            } else if (!putOperation.expired()) {
-                throw new PendingPutOperationException(idempotencyKey,
-                    "Cannot take a new write until existing write completes.");
+        if (putOperation.completed() && putOperation.successful()) {
+            if (putOperation.hasRecord(key, value)) {
+                return Optional.of(putOperation.entrySet());
             }
+
+            throw new IllegalStateException("Given idempotency key is mapped to a different payload.");
         }
 
         return Optional.empty();
@@ -602,14 +616,10 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
         Failed
     }
 
-    private record PutOperation(PutOperationState state, long startedAt, LogStoreEntrySet entrySet) {
+    private record PutOperation(PutOperationState state, long startedAt, long completedAt, LogStoreEntrySet entrySet) {
 
         public static AtomicReference<PutOperation> newAtomicOperation() {
-            return new AtomicReference<>(new PutOperation(PutOperationState.Running, System.nanoTime(), null));
-        }
-
-        public boolean expired() {
-            return (System.nanoTime() - startedAt) >= MAX_PUT_WAIT_NANOS;
+            return new AtomicReference<>(new PutOperation(PutOperationState.Running, System.nanoTime(), -1, null));
         }
 
         public boolean successful() {
