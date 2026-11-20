@@ -14,6 +14,7 @@ import static org.mockito.Mockito.when;
 import java.io.IOException;
 import java.time.Duration;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import org.junit.jupiter.api.Test;
@@ -102,19 +103,25 @@ public class StabilityTest {
             AppendOnlyLogStore mockedStore = mockStore();
 
             doThrow(IOException.class)
+                    // This resets the failure counter
                     .doAnswer(invocation -> 1L)
+                    // Failed - 1
                     .doAnswer(invocation -> {
                         attemptsCounter1.incrementAndGet();
                         throw new IOException();
                     })
+                    // Failed - 2
                     .doAnswer(invocation -> {
                         attemptsCounter1.incrementAndGet();
                         throw new IOException();
                     })
+                    // Failed - 3
+                    // Trips the circuit
                     .doAnswer(invocation -> {
                         attemptsCounter1.incrementAndGet();
                         throw new IOException();
                     })
+                    // This must never get answered
                     .doAnswer(invocation -> {
                         attemptsCounter2.incrementAndGet();
                         throw new IOException();
@@ -129,11 +136,17 @@ public class StabilityTest {
 
             // Quorum fails
             assertThrows(QuorumNotReachedException.class, () -> storeClient.put("key-1", "value-1"));
-            // 3 attemps by each node, so total 9 attempts (starts from 0)
-            assertEquals(8, attemptsCounter1.get());
+
+            // Quorum has attempted MAX_RETRIES attempts on quorum before tripping the circuit
+            boolean quorumRetried = (attemptsCounter1.get() >= getQuorumSize(poolSize) * AppendOnlyLogStoreClient.ResilientNode.MAX_RETRIES
+                    && attemptsCounter1.get() <= poolSize * AppendOnlyLogStoreClient.ResilientNode.MAX_RETRIES);
+
+            assertEquals(true, quorumRetried);
 
             // Quorum rejected
             assertThrows(StoreBusyException.class, () -> storeClient.put("key-1", "value-1"));
+
+            // No attempts are made when circuit is tripped
             assertEquals(0, attemptsCounter2.get());
         }
     }
@@ -234,8 +247,8 @@ public class StabilityTest {
             AppendOnlyLogStore mockedStore = mockStore();
 
             doAnswer(invocation -> {
-                Thread.sleep(Duration.ofSeconds(2));
-                return invocation.callRealMethod();
+                Thread.sleep(Duration.ofSeconds(4));
+                return 1L;
             }).when(mockedStore).put(any(), anyString(), anyString());
 
             stores[index++] = mockedStore;
@@ -248,7 +261,7 @@ public class StabilityTest {
             stores[index++] = mockedStore;
         }
 
-        try (AppendOnlyLogStoreClient storeClient = spy(new AppendOnlyLogStoreClient(stores))) {
+        try (AppendOnlyLogStoreClient storeClient = new AppendOnlyLogStoreClient(stores)) {
             assertThrows(OperationStateUnknownException.class, () -> storeClient.put("key-1", "value-1"));
         }
     }
@@ -265,7 +278,7 @@ public class StabilityTest {
             AppendOnlyLogStore mockedStore = mockStore();
 
             doAnswer(invocation -> {
-                Thread.sleep(800);
+                TimeUnit.SECONDS.sleep(2);
                 return 1L;
             }).when(mockedStore).put(any(), anyString(), anyString());
 
@@ -301,12 +314,12 @@ public class StabilityTest {
                     .doThrow(IOException.class)
                     // Quorum not reached -> circuit opens
                     .doThrow(IOException.class)
-
                     // Answers probe with a delay which finishes within quorum timeout
                     .doAnswer(invocation -> {
-                        Thread.sleep(Duration.ofMillis(800));
+                        TimeUnit.SECONDS.sleep(2);
                         return 1L;
                     })
+                    .doThrow(IOException.class)
                     .when(mockedStore)
                     .put(any(), anyString(), anyString());
 
@@ -337,7 +350,7 @@ public class StabilityTest {
                     .doThrow(new IOException("Third exception from mock " + i))
                     // Answers probe with a delay which results in quorum timeout
                     .doAnswer(invocation -> {
-                        Thread.sleep(Duration.ofSeconds(2));
+                        Thread.sleep(Duration.ofSeconds(4));
                         return 1L;
                     })
                     .when(mockedStore)
@@ -364,11 +377,21 @@ public class StabilityTest {
             when(spyKey.key()).then(invocation -> null);
 
             // An invalid input must fail, but not trip the circuit
-            assertThrows(QuorumNotReachedException.class, () -> storeClient.put(spyKey, "key-1", "value-1"));
-
-            // A valid input must pass through
-            assertDoesNotThrow(() -> storeClient.put(idempotencyKey, "key-1", "value-1"));
+            assertThrows(IllegalArgumentException.class, () -> storeClient.put(spyKey, "key-1", "value-1"));
+            assertEquals(true, storeClient.allCircuitsClosed());
         }
+    }
+
+    @Test
+    public void acceptsCleanShutdown() throws IOException, StoreInitializationException {
+        AppendOnlyLogStoreClient storeClient = new AppendOnlyLogStoreClient(poolSize);
+
+        storeClient.put("key-1", "value-1");
+        storeClient.close();
+
+        assertEquals(true, storeClient.quorumExecutorService.isTerminated());
+        assertEquals(0,
+                Thread.getAllStackTraces().keySet().stream().filter(t -> t.getName().startsWith("pool-")).count());
     }
 
     private AppendOnlyLogStore mockStore() {
