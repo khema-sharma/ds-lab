@@ -2,55 +2,66 @@ package lab.ds.logstore;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
 
 import java.io.IOException;
 import java.time.Duration;
+import java.util.Arrays;
 import java.util.UUID;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
-import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.junit.jupiter.MockitoExtension;
-import org.mockito.stubbing.Stubber;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
+import lab.ds.logstore.AppendOnlyLogStoreClient.ResilientNode;
 import lab.ds.logstore.core.IdempotencyKey;
 
 @ExtendWith(MockitoExtension.class)
 public class StabilityTest {
 
-    private static Logger logger = LoggerFactory.getLogger(StabilityTest.class.getSimpleName());
+    private final int poolSize = 3;
 
     @Test
-    public void assertsMajoritySuccess() throws IOException, StoreInitializationException {
-        AppendOnlyLogStore[] stores = new AppendOnlyLogStore[3];
+    public void aceeptsSuccessfulQuorum() throws IOException, StoreInitializationException {
+        int quorumSize = getQuorumSize(poolSize);
 
-        AppendOnlyLogStore firstMockedStore = mockStore();
+        AppendOnlyLogStore[] stores = new AppendOnlyLogStore[poolSize];
+        int index = 0;
 
-        doThrow(IOException.class)
-                .when(firstMockedStore)
-                .put(any(), anyString(), anyString());
+        for (int i = 0; i < (poolSize - quorumSize); i++) {
+            AppendOnlyLogStore firstMockedStore = mockStore();
 
-        stores[0] = firstMockedStore;
+            doThrow(IOException.class)
+                    .when(firstMockedStore)
+                    .put(any(), anyString(), anyString());
 
-        for (int i = 1; i <= 2; i++) {
+            stores[index++] = firstMockedStore;
+        }
+
+        for (int i = 0; i < quorumSize; i++) {
             AppendOnlyLogStore mockedStore = mockStore();
 
             doAnswer(invocation -> 1L)
                     .when(mockedStore)
                     .put(any(), anyString(), anyString());
 
-            stores[i] = mockedStore;
+            stores[index++] = mockedStore;
         }
 
         try (AppendOnlyLogStoreClient storeClient = new AppendOnlyLogStoreClient(stores)) {
@@ -59,18 +70,132 @@ public class StabilityTest {
     }
 
     @Test
-    public void assertsMajorityFailure() throws IOException, StoreInitializationException {
-        AppendOnlyLogStore[] stores = new AppendOnlyLogStore[3];
+    public void rejectsUnsuccessfulQuorum() throws IOException, StoreInitializationException {
+        int quorumSize = getQuorumSize(poolSize);
 
-        AppendOnlyLogStore firstMockedStore = mockStore();
+        AppendOnlyLogStore[] stores = new AppendOnlyLogStore[poolSize];
+        int index = 0;
 
-        doAnswer(invocation -> 1L)
-                .when(firstMockedStore)
-                .put(any(), anyString(), anyString());
+        for (int i = 0; i < (poolSize - quorumSize); i++) {
+            AppendOnlyLogStore quorumMockStore = mockStore();
 
-        stores[0] = firstMockedStore;
+            doAnswer(invocation -> 1L)
+                    .when(quorumMockStore)
+                    .put(any(), anyString(), anyString());
 
-        for (int i = 1; i <= 2; i++) {
+            stores[index++] = quorumMockStore;
+        }
+
+        for (int i = 0; i < quorumSize; i++) {
+            AppendOnlyLogStore mockedStore = mockStore();
+
+            doThrow(IOException.class).when(mockedStore).put(any(), anyString(), anyString());
+            stores[index++] = mockedStore;
+        }
+
+        try (AppendOnlyLogStoreClient storeClient = new AppendOnlyLogStoreClient(stores)) {
+            assertThrows(QuorumNotReachedException.class, () -> storeClient.put("key-1", "value-1"));
+        }
+    }
+
+    @Test
+    public void rejectsQuorumWhenCircuitTrips() throws IOException, StoreInitializationException {
+        AppendOnlyLogStore[] stores = new AppendOnlyLogStore[poolSize];
+
+        AtomicInteger attemptsCounter1 = new AtomicInteger(0);
+        AtomicInteger attemptsCounter2 = new AtomicInteger(0);
+
+        for (int i = 0; i < poolSize; i++) {
+            AppendOnlyLogStore mockedStore = mockStore();
+
+            doThrow(IOException.class)
+                    // This resets the failure counter
+                    .doAnswer(invocation -> 1L)
+                    // Failed - 1
+                    .doAnswer(invocation -> {
+                        attemptsCounter1.incrementAndGet();
+                        throw new IOException();
+                    })
+                    // Failed - 2
+                    .doAnswer(invocation -> {
+                        attemptsCounter1.incrementAndGet();
+                        throw new IOException();
+                    })
+                    // Failed - 3
+                    // Trips the circuit
+                    .doAnswer(invocation -> {
+                        attemptsCounter1.incrementAndGet();
+                        throw new IOException();
+                    })
+                    // This must never get answered
+                    .doAnswer(invocation -> {
+                        attemptsCounter2.incrementAndGet();
+                        throw new IOException();
+                    })
+                    .when(mockedStore).put(any(), anyString(), anyString());
+
+            stores[i] = mockedStore;
+        }
+
+        try (AppendOnlyLogStoreClient storeClient = new AppendOnlyLogStoreClient(stores)) {
+            assertDoesNotThrow(() -> storeClient.put("key-1", "value-1"));
+
+            // Quorum fails
+            assertThrows(QuorumNotReachedException.class, () -> storeClient.put("key-1", "value-1"));
+
+            // Quorum has attempted MAX_RETRIES attempts on quorum before tripping the
+            // circuit
+            boolean quorumRetried = (attemptsCounter1.get() >= getQuorumSize(poolSize)
+                    * AppendOnlyLogStoreClient.ResilientNode.MAX_RETRIES
+                    && attemptsCounter1.get() <= poolSize * AppendOnlyLogStoreClient.ResilientNode.MAX_RETRIES);
+
+            assertEquals(true, quorumRetried);
+
+            // Quorum rejected
+            assertThrows(StoreBusyException.class, () -> storeClient.put("key-1", "value-1"));
+
+            // No attempts are made when circuit is tripped
+            assertEquals(0, attemptsCounter2.get());
+        }
+    }
+
+    @Test
+    public void acceptsSuccessfulQuorumAfterProbe()
+            throws IOException, StoreInitializationException, InterruptedException {
+
+        AppendOnlyLogStore[] stores = new AppendOnlyLogStore[poolSize];
+        int index = 0;
+
+        for (int i = 0; i < poolSize; i++) {
+            AppendOnlyLogStore mockedStore = mockStore();
+
+            doThrow(IOException.class)
+                    .doThrow(IOException.class)
+                    // Quorum not reached -> circuit opens
+                    .doThrow(IOException.class)
+                    // Answer probes
+                    .doAnswer(invocation -> 1L)
+                    .when(mockedStore)
+                    .put(any(), anyString(), anyString());
+
+            stores[index++] = mockedStore;
+        }
+
+        try (AppendOnlyLogStoreClient storeClient = new AppendOnlyLogStoreClient(stores)) {
+            assertThrows(QuorumNotReachedException.class, () -> storeClient.put("key-1", "value-1"));
+            assertThrows(StoreBusyException.class, () -> storeClient.put("key-1", "value-1"));
+            // Wait until circuit resets, open -> half-open
+            storeClient.internalWaitUntilStateSwitchThreshold();
+            // half-open -> probe -> closed
+            assertDoesNotThrow(() -> storeClient.put("key-1", "value-1"));
+        }
+    }
+
+    @Test
+    public void rejectsCloseToOpenedStateTransition() throws IOException, StoreInitializationException {
+        AppendOnlyLogStore[] stores = new AppendOnlyLogStore[poolSize];
+
+        for (int i = 0; i < poolSize; i++) {
             AppendOnlyLogStore mockedStore = mockStore();
 
             doThrow(IOException.class)
@@ -81,23 +206,67 @@ public class StabilityTest {
         }
 
         try (AppendOnlyLogStoreClient storeClient = new AppendOnlyLogStoreClient(stores)) {
-            assertThrows(IOException.class, () -> storeClient.put("key-1", "value-1"));
+            assertThrows(QuorumNotReachedException.class, () -> storeClient.put("key-1", "value-1"));
+            assertThrows(StoreBusyException.class, () -> storeClient.put("key-1", "value-1"));
         }
     }
 
     @Test
-    public void rejectsSlowMajority() throws IOException, StoreInitializationException {
-        AppendOnlyLogStore[] stores = new AppendOnlyLogStore[3];
+    public void rejectsOpenedToOpenedStateTransition()
+            throws IOException, StoreInitializationException, InterruptedException {
 
-        for (int i = 0; i < 3; i++) {
+        AppendOnlyLogStore[] stores = new AppendOnlyLogStore[poolSize];
+
+        for (int i = 0; i < poolSize; i++) {
+            AppendOnlyLogStore mockedStore = mockStore();
+
+            doThrow(IOException.class)
+                    .doThrow(IOException.class)
+                    // Quorum not reached: closed -> open
+                    .doThrow(IOException.class)
+                    // Wait until circuit trips
+                    // open -> half-open
+                    // Store is busy: hal-open -> probing -> open
+                    .doThrow(IOException.class)
+                    .when(mockedStore)
+                    .put(any(), anyString(), anyString());
+
+            stores[i] = mockedStore;
+        }
+
+        try (AppendOnlyLogStoreClient storeClient = new AppendOnlyLogStoreClient(stores)) {
+            assertThrows(QuorumNotReachedException.class, () -> storeClient.put("key-1", "value-1"));
+            assertThrows(StoreBusyException.class, () -> storeClient.put("key-1", "value-1"));
+
+            storeClient.internalWaitUntilStateSwitchThreshold();
+
+            assertThrows(QuorumNotReachedException.class, () -> storeClient.put("key-1", "value-1"));
+        }
+    }
+
+    @Test
+    public void rejectsSlowQuorum() throws IOException, StoreInitializationException, InterruptedException {
+        int quorumSize = getQuorumSize(poolSize);
+
+        AppendOnlyLogStore[] stores = new AppendOnlyLogStore[poolSize];
+        int index = 0;
+
+        for (int i = 0; i < quorumSize; i++) {
             AppendOnlyLogStore mockedStore = mockStore();
 
             doAnswer(invocation -> {
-                Thread.sleep(Duration.ofSeconds(10));
+                Thread.sleep(Duration.ofSeconds(4));
                 return 1L;
             }).when(mockedStore).put(any(), anyString(), anyString());
 
-            stores[i] = mockedStore;
+            stores[index++] = mockedStore;
+        }
+
+        for (int i = 0; i < (poolSize - quorumSize); i++) {
+            AppendOnlyLogStore mockedStore = mockStore();
+
+            doAnswer(invocation -> 1L).when(mockedStore).put(any(), anyString(), anyString());
+            stores[index++] = mockedStore;
         }
 
         try (AppendOnlyLogStoreClient storeClient = new AppendOnlyLogStoreClient(stores)) {
@@ -106,151 +275,235 @@ public class StabilityTest {
     }
 
     @Test
-    public void assertsClosedToOpenTransition() throws IOException, StoreInitializationException {
-        AppendOnlyLogStore[] stores = new AppendOnlyLogStore[3];
-
-        for (int i = 0; i < 3; i++) {
-            AppendOnlyLogStore mockedStore = mockStore();
-
-            doThrow(IOException.class)
-                    .when(mockedStore)
-                    .put(any(), anyString(), anyString());
-
-            stores[i] = mockedStore;
-        }
-
-        try (AppendOnlyLogStoreClient storeClient = new AppendOnlyLogStoreClient(stores)) {
-            assertThrows(IOException.class, () -> storeClient.put("key-1", "value-1"));
-            assertThrows(StoreBusyException.class, () -> storeClient.put("key-1", "value-1"));
-        }
-    }
-
-    @Test
-    public void assertsHalfOpenToClosedTransition()
+    public void acceptsSlowQuorumThatCompletes()
             throws IOException, StoreInitializationException, InterruptedException {
-        AppendOnlyLogStore[] stores = new AppendOnlyLogStore[3];
+        int quorumSize = getQuorumSize(poolSize);
 
-        for (int i = 0; i < 3; i++) {
+        AppendOnlyLogStore[] stores = new AppendOnlyLogStore[poolSize];
+        int index = 0;
+
+        for (int i = 0; i < quorumSize; i++) {
+            AppendOnlyLogStore mockedStore = mockStore();
+
+            doAnswer(invocation -> {
+                TimeUnit.SECONDS.sleep(2);
+                return 1L;
+            }).when(mockedStore).put(any(), anyString(), anyString());
+
+            stores[index++] = mockedStore;
+        }
+
+        for (int i = 0; i < (poolSize - quorumSize); i++) {
             AppendOnlyLogStore mockedStore = mockStore();
 
             doThrow(IOException.class)
-                    .doThrow(IOException.class)
-                    .doThrow(IOException.class)
-                    .doAnswer(invocation -> 1L)
-                    .when(mockedStore)
-                    .put(any(), anyString(), anyString());
+                    .when(mockedStore).put(any(), anyString(), anyString());
 
-            stores[i] = mockedStore;
+            stores[index++] = mockedStore;
         }
 
         try (AppendOnlyLogStoreClient storeClient = new AppendOnlyLogStoreClient(stores)) {
-            assertThrows(IOException.class, () -> storeClient.put("key-1", "value-1"));
-            assertThrows(StoreBusyException.class, () -> storeClient.put("key-1", "value-1"));
-
-            storeClient.internalWaitUntilStateSwitchThreshold();
-
             assertDoesNotThrow(() -> storeClient.put("key-1", "value-1"));
         }
     }
 
-    /**
-     * This test asserts failure modes handled by {@code AppendOnlyLogStoreClient}.
-     * <p>
-     * It asserts that the client:
-     * <ul>
-     * <li>throws {@code IOException} when it fails to save the record before
-     * opening the circuit
-     * <li>throws {@code StoreBusyException} when the circuit is open
-     * <li>throws {@code IOException} again when it fails to save when circuit was
-     * half open
-     * <li>the {@code get} call returns the value if save was successful when
-     * circuit was half open
-     * <li>never calls the non-idempotent write when it reties several times before
-     * opening the circuit
-     * </ul>
-     * 
-     * @throws StoreInitializationException
-     * @throws IOException
-     * @throws InterruptedException
-     */
     @Test
-    @DisplayName("Store client with circuit breaker")
-    public void assertsStoreClientResliency()
-            throws StoreInitializationException, IOException, InterruptedException {
+    public void acceptsSlowQuorumProbesWhichComplete()
+            throws IOException, StoreInitializationException, InterruptedException {
 
-        AppendOnlyLogStore[] stores = new AppendOnlyLogStore[3];
+        AppendOnlyLogStore[] stores = new AppendOnlyLogStore[poolSize];
 
-        for (int i = 0; i < 3; i++) {
+        // All three nodes fail consecutively for 3 times (for each retry)
+        // and then each node provides a delayed response
+        for (int i = 0; i < poolSize; i++) {
             AppendOnlyLogStore mockedStore = mockStore();
 
-            Stubber putStubber = null;
-
-            if (i == 1) {
-                putStubber = doThrow(IOException.class).doAnswer(invocation -> {
-                    logger.info("Delaying IOException throw...");
-                    Thread.sleep(Duration.ofSeconds(3));
-
-                    throw new IOException();
-                });
-            } else {
-                putStubber = doThrow(IOException.class).doThrow(IOException.class);
-            }
-
-            // Trips the circuit to open state
-            putStubber.doThrow(IOException.class)
-                    // Called after 1st wait, trips back to open state from half-open state
-                    .doThrow(IOException.class);
-
-            // Called after 2nd wait, closes the circuit
-            if (i == 2) {
-                putStubber.doAnswer(invocation -> {
-                    logger.info("Delaying answer...");
-                    Thread.sleep(Duration.ofSeconds(3));
-
-                    return 1L;
-                });
-            } else {
-                putStubber.doAnswer(invocation -> 1L);
-            }
-
-            putStubber.when(mockedStore).put(any(IdempotencyKey.class), anyString(), anyString());
-
-            when(mockedStore.get(anyString())).thenReturn("value-1");
+            doThrow(IOException.class)
+                    .doThrow(IOException.class)
+                    // Quorum not reached -> circuit opens
+                    .doThrow(IOException.class)
+                    // Answers probe with a delay which finishes within quorum timeout
+                    .doAnswer(invocation -> {
+                        TimeUnit.SECONDS.sleep(2);
+                        return 1L;
+                    })
+                    .doThrow(IOException.class)
+                    .when(mockedStore)
+                    .put(any(), anyString(), anyString());
 
             stores[i] = mockedStore;
         }
 
         try (AppendOnlyLogStoreClient storeClient = new AppendOnlyLogStoreClient(stores)) {
-            // Three failures in sequence must open the circuit
-            assertThrows(IOException.class, () -> storeClient.put("key-1", "value-1"));
-
-            // Exception thrown by client when circuit is open
-            // Call should never reach the mocked store
-            assertThrows(StoreBusyException.class, () -> storeClient.put("key-1", "value-1"));
-
+            assertThrows(QuorumNotReachedException.class, () -> storeClient.put("key-1", "value-1"));
+            // Wait until circuit resets, open -> half-open
             storeClient.internalWaitUntilStateSwitchThreshold();
+            // half-open -> probe -> closed
+            assertDoesNotThrow(() -> storeClient.put("key-1", "value-1"));
+        }
+    }
 
-            // Circuit must be half-open, mocked store will call the actual store's method
-            // and trip back
-            assertThrows(IOException.class, () -> storeClient.put("key-1", "value-1"));
+    @Test
+    public void rejectsSlowQuorumProbes() throws IOException, StoreInitializationException, InterruptedException {
+        AppendOnlyLogStore[] stores = new AppendOnlyLogStore[poolSize];
 
-            // Unlike closed state, half-open state will open the circuit immediately
-            assertThrows(StoreBusyException.class, () -> storeClient.put("key-1", "value-1"));
+        // All three nodes fail consecutively for 3 times (for each retry)
+        // and then each node provides a delayed response
+        for (int i = 0; i < poolSize; i++) {
+            AppendOnlyLogStore mockedStore = mockStore();
 
-            storeClient.internalWaitUntilStateSwitchThreshold();
+            doThrow(new IOException("First exception from mock " + i))
+                    .doThrow(new IOException("Second exception from mock " + i))
+                    // Quorum not reached -> circuit opens
+                    .doThrow(new IOException("Third exception from mock " + i))
+                    // Answers probe with a delay which results in quorum timeout
+                    .doAnswer(invocation -> {
+                        Thread.sleep(Duration.ofSeconds(4));
+                        return 1L;
+                    })
+                    .when(mockedStore)
+                    .put(any(), anyString(), anyString());
 
-            // This closes the circuit
-            storeClient.put("key-1", "value-1");
-
-            assertEquals("value-1", storeClient.get("key-1"));
-
-            // Assert that non-idempotent write never happens
-            for (AppendOnlyLogStore mockedStore : stores) {
-                verify(mockedStore, never()).put(anyString(), anyString());
-            }
-
+            stores[i] = mockedStore;
         }
 
+        try (AppendOnlyLogStoreClient storeClient = new AppendOnlyLogStoreClient(stores)) {
+            assertThrows(QuorumNotReachedException.class, () -> storeClient.put("key-1", "value-1"));
+            // Wait until circuit resets, open -> half-open
+            storeClient.internalWaitUntilStateSwitchThreshold();
+            // half-open -> probe -> open
+            assertThrows(OperationStateUnknownException.class, () -> storeClient.put("key-1", "value-1"));
+            assertEquals(true, storeClient.allCircuitsInState(ResilientNode.State.Open));
+        }
+    }
+
+    @Test
+    public void acceptsCallerSideErrorsDoNotTripCircuit() throws IOException, StoreInitializationException {
+        try (AppendOnlyLogStoreClient storeClient = new AppendOnlyLogStoreClient(poolSize)) {
+            IdempotencyKey idempotencyKey = new IdempotencyKey("id");
+
+            IdempotencyKey spyKey = spy(idempotencyKey);
+            when(spyKey.key()).then(invocation -> null);
+
+            // An invalid input must fail, but not trip the circuit
+            assertThrows(IllegalArgumentException.class, () -> storeClient.put(spyKey, "key-1", "value-1"));
+            assertEquals(true, storeClient.allCircuitsInState(ResilientNode.State.Closed));
+        }
+    }
+
+    @Test
+    public void rejectSlowPutMidLoopTripAsUnknownState()
+            throws IOException, StoreInitializationException, InterruptedException, ExecutionException {
+        AppendOnlyLogStore[] stores = new AppendOnlyLogStore[poolSize];
+
+        for (int i = 0; i < poolSize; i++) {
+            AppendOnlyLogStore mockedStore = mockStore();
+
+            doAnswer(invocation -> {
+                Thread.sleep(Duration.ofSeconds(4));
+                return 1L;
+            }).when(mockedStore).put(any(), anyString(), anyString());
+
+            stores[i] = mockedStore;
+        }
+
+        try (AppendOnlyLogStoreClient storeClient = new AppendOnlyLogStoreClient(stores)) {
+            try (ExecutorService service = Executors.newFixedThreadPool(2)) {
+                AtomicReference<Throwable> exception1 = new AtomicReference<>();
+                AtomicReference<Throwable> exception2 = new AtomicReference<>();
+
+                Future<?> future1 = service.submit(() -> {
+                    try {
+                        storeClient.put("key-1", "value-1");
+                    } catch (Throwable t) {
+                        exception1.set(t);
+                    }
+                });
+
+                Future<?> future2 = service.submit(() -> {
+                    try {
+                        storeClient.put("key-2", "value-2");
+                    } catch (Throwable t) {
+                        exception2.set(t);
+                    }
+                });
+
+                future1.get();
+                future2.get();
+
+                assertInstanceOf(OperationStateUnknownException.class, exception1.get());
+                Arrays.stream(exception1.get().getSuppressed())
+                        .forEach(t -> assertInstanceOf(OperationStateUnknownException.class, t));
+
+                assertInstanceOf(OperationStateUnknownException.class, exception2.get());
+                Arrays.stream(exception2.get().getSuppressed())
+                        .forEach(t -> assertInstanceOf(OperationStateUnknownException.class, t));
+
+                assertTrue(storeClient.allCircuitsInState(ResilientNode.State.Open));
+            }
+        }
+    }
+
+    @Test
+    public void rejectDefinitiveErrorMidLoopTripAsQuorumNotReached()
+            throws IOException, StoreInitializationException, InterruptedException, ExecutionException {
+        AppendOnlyLogStore[] stores = new AppendOnlyLogStore[poolSize];
+
+        for (int i = 0; i < poolSize; i++) {
+            AppendOnlyLogStore mockedStore = mockStore();
+            stores[i] = mockedStore;
+
+            doThrow(IOException.class).when(mockedStore).put(any(), anyString(), anyString());
+        }
+
+        try (AppendOnlyLogStoreClient storeClient = new AppendOnlyLogStoreClient(stores)) {
+            try (ExecutorService service = Executors.newFixedThreadPool(2)) {
+                AtomicReference<Throwable> exception1 = new AtomicReference<>();
+                AtomicReference<Throwable> exception2 = new AtomicReference<>();
+
+                Future<?> future1 = service.submit(() -> {
+                    try {
+                        storeClient.put("key-1", "value-1");
+                    } catch (Throwable t) {
+                        exception1.set(t);
+                    }
+                });
+
+                Future<?> future2 = service.submit(() -> {
+                    try {
+                        storeClient.put("key-2", "value-2");
+                    } catch (Throwable t) {
+                        exception2.set(t);
+                    }
+                });
+
+                future1.get();
+                future2.get();
+
+                assertInstanceOf(QuorumNotReachedException.class, exception1.get());
+                Arrays.stream(exception1.get().getSuppressed())
+                        .forEach(t -> assertInstanceOf(AppendOnlyLogStoreClient.OperationRuntimeException.class,
+                                t));
+
+                assertInstanceOf(QuorumNotReachedException.class, exception2.get());
+                Arrays.stream(exception2.get().getSuppressed())
+                        .forEach(t -> assertInstanceOf(AppendOnlyLogStoreClient.OperationRuntimeException.class,
+                                t));
+
+                assertTrue(storeClient.allCircuitsInState(ResilientNode.State.Open));
+            }
+        }
+    }
+
+    @Test
+    public void acceptsCleanShutdown() throws IOException, StoreInitializationException {
+        AppendOnlyLogStoreClient storeClient = new AppendOnlyLogStoreClient(poolSize);
+
+        storeClient.put("key-1", "value-1");
+        storeClient.close();
+
+        assertEquals(true, storeClient.quorumExecutorService.isTerminated());
+        storeClient.nodes.forEach(n -> assertTrue(n.putExecutor.isTerminated()));
     }
 
     private AppendOnlyLogStore mockStore() {
@@ -258,6 +511,10 @@ public class StabilityTest {
         when(store.id()).thenReturn("store_" + UUID.randomUUID().toString().replaceAll("-", "").substring(0, 7));
 
         return store;
+    }
+
+    private int getQuorumSize(int poolSize) {
+        return (poolSize * 4) / 5;
     }
 
 }

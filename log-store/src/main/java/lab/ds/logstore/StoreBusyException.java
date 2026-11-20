@@ -1,5 +1,11 @@
 package lab.ds.logstore;
 
-public class StoreBusyException extends RuntimeException {
+import lab.ds.logstore.core.IdempotencyKey;
+
+public class StoreBusyException extends RetryableStoreException {
+
+    public StoreBusyException(IdempotencyKey key) {
+        super(key, "Quorum is unavailable, cannot perform put.");
+    }
 
 }

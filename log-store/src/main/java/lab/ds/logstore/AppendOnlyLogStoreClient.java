@@ -12,27 +12,67 @@ import java.util.concurrent.ExecutorCompletionService;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
-import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Collectors;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import lab.ds.logstore.core.IdempotencyKey;
 
+/**
+ * Client that puts and gets from a quorum of {@code AppendOnlyLogStore} nodes.
+ * <p>
+ * The constructor {@code AppendOnlyLogStoreClient(int size)} creates a client
+ * with {@code size} number of {@code AppendOnlyLogStore} nodes. 80% of the
+ * nodes form a quorum. The default constructore
+ * {@code AppendOnlyLogStoreClient()} creares a client with 3 nodes.
+ * 
+ * An opertation can fail due to following reasons:
+ * <ul>
+ * <li>Stores fail deterministically to perform the operation -
+ * {@code QuorumNotReachedException} is thrown
+ * <li>Stores did not respond within a stipulated deadline of 3 seconds -
+ * {@code OperationStateUnknownException} is thrown
+ * <li>Stores have been cut off due to overload - {@code StoreBusyException} is
+ * thrown
+ * </ul>
+ * 
+ * In all the above cases the exceptions include {@code IdempotencyKey} so that
+ * callers can retry the operation with same key.
+ * 
+ */
 public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable {
 
     private static final Logger logger = LoggerFactory.getLogger(AppendOnlyLogStoreClient.class.getSimpleName());
 
-    private static final int MINIMUM_POOL_SIZE = 3;
+    private static final int DEFAULT_POOL_SIZE = 3;
+    static final int MINIMUM_POOL_SIZE = 3;
+    static final long QUORUM_TIMOUT_NANOS;
 
-    private final ArrayList<ResilientNode> nodes;
+    static {
+        // The putWithRetries will be capped atmost by (PUT_TASK_EXPIRT_NANOS *
+        // MAX_RETRIES) ns.
+        //
+        // For each node this time is spent in parallel
+        QUORUM_TIMOUT_NANOS = (ResilientNode.MAX_RETRIES * ResilientNode.PUT_TASK_TIMEOUT_NANOS)
+                // 2 backoffs
+                + TimeUnit.SECONDS.toNanos(2);
+    }
+
+    final ArrayList<ResilientNode> nodes;
     private final int poolSize;
     private final int quorumSize;
 
-    private final ExecutorService quorumExecutorService;
+    final ExecutorService quorumExecutorService;
+
+    public AppendOnlyLogStoreClient() throws StoreInitializationException, IOException {
+        this(DEFAULT_POOL_SIZE);
+    }
 
     public AppendOnlyLogStoreClient(int size) throws StoreInitializationException, IOException {
         this(size, null);
@@ -50,9 +90,9 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
         }
 
         poolSize = size;
-        quorumSize = (int) (poolSize * 4) / 5;
+        quorumSize = (poolSize * 4) / 5;
 
-        quorumExecutorService = Executors.newFixedThreadPool(5);
+        quorumExecutorService = createPoolExecutorService();
 
         nodes = new ArrayList<>(poolSize);
         for (int i = 0; i < poolSize; i++) {
@@ -61,83 +101,108 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
     }
 
     /**
-     * Puts the key-value pair (record) in the store.
-     * <p>
-     * The client implements Circuit Breaker stability pattern. It opens the circuit
-     * when it fails to get an answer from the downstream store after retrying three
-     * times. It uses an idempotency key to protect the duplicate writes.
-     * <p>
-     * The client does not have an explicit solution in place to protect itself from
-     * getting crushed under load using Bulkheads stability pattern. It somewhat
-     * handles it by using a fixed thread pool, but still a complete solution is not
-     * in place.
+     * Generates an idempotency key and calls
+     * {@link #put(IdempotencyKey, String, String)}.
      * 
      * @param key   Key to be used to fetch the data
      * @param value Value to be saved in the store
      * 
-     * @throws IOException        if any issues in saving the record
-     * @throws StoreBusyException if circuit is currently open
      */
     @Override
-    public void put(String key, String value) throws IOException {
+    public void put(String key, String value) throws RetryableStoreException {
         put(new IdempotencyKey(UUID.randomUUID().toString()), key, value);
     }
 
     @Override
-    public void put(IdempotencyKey idempotencyKey, String key, String value) throws IOException {
-        resetFromLastTripping();
+    public void put(IdempotencyKey idempotencyKey, String key, String value) throws RetryableStoreException {
+        if (idempotencyKey == null || idempotencyKey.key() == null ||
+                idempotencyKey.key().isBlank()) {
+            throw new IllegalArgumentException("idempotencyKey cannot be null.");
+        }
+
+        resetCircuits();
 
         logger.info("Attempting the put operation on the quorum...");
-        failIfQuorumIsBusy();
+        failIfQuorumIsBusy(idempotencyKey);
 
         ExecutorCompletionService<Boolean> opCompletionService = new ExecutorCompletionService<>(quorumExecutorService);
 
-        nodes.forEach(decoratedNode -> opCompletionService.submit(() -> {
+        long deadline = System.nanoTime() + QUORUM_TIMOUT_NANOS;
+        boolean quorumReached = false;
+
+        List<Future<Boolean>> putFutures = nodes.stream().map(decoratedNode -> opCompletionService.submit(() -> {
             decoratedNode.put(idempotencyKey, key, value);
             return true;
-        }));
-
-        long deadline = System.nanoTime()
-                + TimeUnit.SECONDS.toNanos(nodes.size() * ResilientNode.MAX_RETRIES * ResilientNode.PUT_TIMEOUT_SECS);
+        })).collect(Collectors.toList());
 
         try {
             int successCount = 0;
             int failureCount = 0;
 
             int unknownStateErrors = 0;
+            int openCircuitErrors = 0;
 
-            while (successCount < quorumSize && (poolSize - failureCount) >= quorumSize) {
+            List<Throwable> causes = new ArrayList<>();
+
+            while (successCount < quorumSize && (poolSize - failureCount) >= quorumSize
+                    && (successCount + failureCount + unknownStateErrors) < poolSize) {
                 Future<Boolean> futureOp = opCompletionService.poll(deadline - System.nanoTime(), TimeUnit.NANOSECONDS);
 
                 if (futureOp == null) {
                     throw new OperationStateUnknownException(idempotencyKey,
-                            "Timeout while awaiting response from quorum");
+                            "Timeout while awaiting response from quorum", causes);
                 }
 
                 if (succeededOperation(futureOp)) {
                     successCount++;
                 } else {
-                    if (futureOp.exceptionNow() instanceof OperationStateUnknownException) {
-                        unknownStateErrors++;
+                    Throwable executionException = futureOp.exceptionNow();
+
+                    if (executionException instanceof IllegalArgumentException
+                            || executionException instanceof IllegalStateException) {
+                        throw (RuntimeException) executionException;
                     }
 
-                    failureCount++;
+                    causes.add(executionException);
+
+                    if (executionException instanceof OperationStateUnknownException) {
+                        // An unknown state can't count toward quorum failures
+                        unknownStateErrors++;
+                    } else {
+                        failureCount++;
+
+                        if (executionException instanceof CircuitOpenException) {
+                            openCircuitErrors++;
+                        }
+                    }
                 }
             }
 
             if (successCount < quorumSize) {
-                logger.error("The put operation failed, did not get confirmation from the quorum");
+                logger.error("The put operation failed, did not get the confirmation from the quorum");
 
                 if (unknownStateErrors > 0) {
                     throw new OperationStateUnknownException(idempotencyKey,
-                            "Unable to determine the state of the put operation.");
+                            "Unable to determine the state of the put operation", causes);
                 }
 
-                throw new IOException("Failed to save record");
+                if (successCount == 0 && openCircuitErrors == poolSize) {
+                    throw new StoreBusyException(idempotencyKey);
+                }
+
+                throw new QuorumNotReachedException(idempotencyKey, "Failed to save record", causes);
             }
+
+            quorumReached = true;
+            logger.info(" put operation on the quorum was successful");
+
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new OperationStateUnknownException(idempotencyKey, e);
+        } finally {
+            if (!quorumReached) {
+                putFutures.forEach(future -> future.cancel(true));
+            }
         }
     }
 
@@ -172,6 +237,18 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
 
     @Override
     public void close() throws IOException {
+        quorumExecutorService.shutdown();
+        
+        try {
+            if (!quorumExecutorService.awaitTermination(QUORUM_TIMOUT_NANOS, TimeUnit.NANOSECONDS)) {
+                logger.warn("Node tasks were still running even after await; interrupting");
+                quorumExecutorService.shutdownNow();
+            }
+        } catch (InterruptedException e) {
+            quorumExecutorService.shutdownNow();
+            Thread.currentThread().interrupt();
+        }
+
         nodes.forEach(store -> {
             try {
                 store.close();
@@ -179,20 +256,28 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
                 logger.error("An error occurred while closing the store: " + e.getMessage(), e);
             }
         });
-
-        quorumExecutorService.shutdownNow();
     }
 
-    private void resetFromLastTripping() {
+    boolean allCircuitsInState(ResilientNode.State state) {
+        for (ResilientNode node : nodes) {
+            if (!node.getCircuitState().equals(state)) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private void resetCircuits() {
         nodes.forEach(node -> node.resetCircuit());
     }
 
-    private void failIfQuorumIsBusy() throws StoreBusyException {
-        long totalAccessible = nodes.stream().filter(node -> !node.circuitOpen()).count();
+    private void failIfQuorumIsBusy(IdempotencyKey idempotencyKey) throws StoreBusyException {
+        long totalAccessible = nodes.stream().filter(node -> node.accessible()).count();
 
         if (totalAccessible < quorumSize) {
-            logger.error("Quorum has been cut off, backing off...");
-            throw new StoreBusyException();
+            logger.warn("Quorum has been cut off, backing off...");
+            throw new StoreBusyException(idempotencyKey);
         }
     }
 
@@ -208,8 +293,12 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
         return state;
     }
 
-    void internalWaitUntilStateSwitchThreshold() throws InterruptedException {
-        nodes.forEach(node -> node.internalTickLastTrippedBackwardsBy(3));
+    void internalWaitUntilStateSwitchThreshold() {
+        nodes.forEach(node -> node.internalTickLastTrippedBackwardsBy(9));
+    }
+
+    private ExecutorService createPoolExecutorService() {
+        return Executors.newVirtualThreadPerTaskExecutor();
     }
 
     private static class CircuitOpenException extends Exception {
@@ -220,68 +309,109 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
 
     }
 
-    private static class OperationRuntimeException extends RuntimeException {
+    static class OperationRuntimeException extends RuntimeException {
 
-        public OperationRuntimeException(AppendOnlyLogStore node, List<Throwable> causes) {
-            super("Runtime error.");
+        public OperationRuntimeException(AppendOnlyLogStore node, String message, List<Throwable> causes) {
+            super(message);
+
+            if (causes != null) {
+                causes.forEach(this::addSuppressed);
+            }
         }
 
     }
 
     /**
-     * ResilientNode wraps an AppendOnlyStore to add resiliency to its operations.
+     * Decorates {@code AppendOnlyStore} to add resiliency to its operations.
      * <p>
-     * It uses Circuit Breaker pattern to protect the downstream store from getting
-     * overloaded by tripping the circuit whenever it gets consecutive errors.
-     * <p>
-     * Before considering the downstream store as "loaded", it reties the operations
-     * multiple times to see if the errors are transient. In its current shape the
-     * retries are not backedoff incremently, they happen immediately.
+     * Circuit Breaker protectx the downstream store from getting overloaded by
+     * tripping the circuit when store operations throw errors.
+     * 
      */
-    private static class ResilientNode {
+    static class ResilientNode {
 
         private static Logger logger = LoggerFactory.getLogger(ResilientNode.class.getSimpleName());
 
-        private static final int CIRCUIT_TRIP_THRESHOLD = 3;
-        private static final int MAX_RETRIES = 3;
-        private static final long RESET_TIME_INTERVAL_MILLIS = 3000;
-        private static final int PUT_TIMEOUT_SECS = 3;
+        static final int CIRCUIT_TRIP_THRESHOLD = 3;
+        static final int MAX_RETRIES = 3;
 
-        private final ExecutorService putExecutors;
-        private final ExecutorCompletionService<Long> putCompletionService;
+        private static final long RESET_TIME_INTERVAL_NANOS = TimeUnit.SECONDS.toNanos(3 * MAX_RETRIES);
+        private static final long PUT_TASK_TIMEOUT_NANOS = TimeUnit.SECONDS.toNanos(3);
 
-        private enum State {
+        private static final int RETRY_JITTER_MAX_MILLIS = 1000;
+
+        enum State {
             Closed, HalfOpen, Probing, Open
         }
 
-        private final AtomicReference<State> state;
-        private final AppendOnlyLogStore node;
+        private record CurrentState(State state, long openedAt, AtomicInteger failures) {
+        }
 
-        private final AtomicLong lastTrippedTime;
+        final ExecutorService putExecutor;
+        private final AppendOnlyLogStore node;
+        private final AtomicReference<CurrentState> currentState;
 
         public ResilientNode(AppendOnlyLogStore store) {
             node = store;
-            state = new AtomicReference<State>(State.Closed);
 
-            lastTrippedTime = new AtomicLong(Long.MIN_VALUE);
+            currentState = new AtomicReference<CurrentState>(
+                    new CurrentState(State.Closed, Long.MIN_VALUE, new AtomicInteger()));
 
-            putExecutors = Executors.newCachedThreadPool();
-            putCompletionService = new ExecutorCompletionService<>(putExecutors);
+            putExecutor = Executors.newVirtualThreadPerTaskExecutor();
         }
 
-        public void put(IdempotencyKey idempotencyKey, String key, String value) throws CircuitOpenException {
-            if (circuitOpen() || circuitUnderProbe()) {
-                logger.error("Won't call the put operation on node " + node.id()
-                        + ", its circuit is either open or under probe by some other thread");
-                throw new CircuitOpenException(node);
-            }
+        /**
+         * Puts the given key-value pair (record) to the wrapped
+         * {@code AppendOnlyLogStore}.
+         * 
+         * <p>
+         * This method's execution path varies depending on the node's circuit state
+         * (Closed/Opened/Half Opened</b>).
+         * <br/>
+         * <b>Closed</b>: If circuit is closed then it calls store's put method from
+         * inside a retry loop (3 iterations in its current shape). Failure repeats the
+         * iteration, whereas a success will immediately return. If the retry loop
+         * exhausts, because each attempt failed, then the circuit gets opened.
+         *
+         * <b>Open</b>: If the circuit is open then there is no retry loop. The method
+         * simply throws
+         * {@code CircuitOpenException} immediately.
+         * 
+         * <b>Half-open</b>: It the circuit is half-open then it tries to move to
+         * probing state. If it fails (because some other put is currently probing) then
+         * it throws {@code CircuitOpenException}. If it succeeds in moving
+         * to probing state then it calls the store's put method once. If call succeeds
+         * then the circuit gets closed else it gets opened again.
+         * 
+         * A note on retry loop:
+         * <ul>
+         * <li>In each iteration, the store's put is executed asynchronously, guarded by
+         * a
+         * timeout (3 seconds in its current form)
+         * <li>If the call does not complete within this stipulated deadline then the
+         * task is canceled and the retry loop continues with next attempt
+         * <li>If all the attempts fail with timeout then
+         * {@code OperationStateUnknownException} is thrown
+         * <li>Each iteration waits for a jittered random period before continuing to
+         * the
+         * next
+         * </ul>
+         * 
+         * @param idempotencyKey
+         * @param key
+         * @param value
+         * @throws CircuitOpenException
+         * @throws IOException
+         */
+        public void put(IdempotencyKey idempotencyKey, String key, String value)
+                throws CircuitOpenException, IOException {
+            logger.info(" performing put on " + node.id() + "...");
 
-            if (circuitHalfOpen()) {
-                probeOnce(idempotencyKey, key, value);
-                return;
+            switch (currentState.get().state()) {
+                case Open, Probing -> throw new CircuitOpenException(node);
+                case HalfOpen -> probeOnce(idempotencyKey, key, value);
+                case Closed -> putWithRetries(idempotencyKey, key, value);
             }
-
-            putWithRetries(idempotencyKey, key, value);
         }
 
         public String get(String key) throws IOException {
@@ -289,153 +419,221 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
         }
 
         public void close() throws IOException {
-            node.close();
+            putExecutor.shutdownNow();
+
+            try {
+                putExecutor.awaitTermination(PUT_TASK_TIMEOUT_NANOS, TimeUnit.NANOSECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            } finally {
+                node.close();
+            }
+        }
+
+        State getCircuitState() {
+            return currentState.get().state();
         }
 
         private void probeOnce(IdempotencyKey idempotencyKey, String key, String value)
-                throws CircuitOpenException {
+                throws CircuitOpenException, IOException {
 
-            if (!probeCircuit()) {
+            if (!transitionState(State.HalfOpen, State.Probing)) {
                 logger.error(node.id() + " could not be probed, some other thread has already started the probing");
                 throw new CircuitOpenException(node);
             }
 
+            boolean succeeded = false;
+
             try {
-                putWithTimebound(idempotencyKey, key, value);
-
-                logger.error("Probe succeeded for node " + node.id() + ", closing its circuit");
-                closeCircuit();
-
+                putWithTimeout(idempotencyKey, key, value);
+                succeeded = true;
+            } catch (InterruptedException | TimeoutException e) {
+                throw new OperationStateUnknownException(idempotencyKey,
+                        "Couldn't determine the result of the slow put task.", e);
+            } catch (IllegalArgumentException | IllegalStateException e) {
+                succeeded = true;
+                throw e;
             } catch (IOException e) {
-                throw new OperationRuntimeException(node, List.of(e));
+                throw e;
+            } catch (RuntimeException e) {
+                throw new IOException(e);
+            } finally {
+                transitionState(State.Probing, succeeded ? State.Closed : State.Open);
             }
 
         }
 
-        private synchronized void resetCircuit() {
-            long tripTime = lastTrippedTime.get();
+        private void resetCircuit() {
+            CurrentState cState = currentState.get();
+            boolean timeLapsed = (System.nanoTime() - cState.openedAt()) >= RESET_TIME_INTERVAL_NANOS;
 
-            if (tripTime == Long.MIN_VALUE) {
-                return;
-            }
-
-            long currentTime = System.nanoTime();
-            long timeLapse = TimeUnit.NANOSECONDS.toMillis(currentTime - lastTrippedTime.get());
-
-            if (timeLapse >= RESET_TIME_INTERVAL_MILLIS) {
-                halfOpenCircuit();
-                lastTrippedTime.set(Long.MIN_VALUE);
+            if (cState.state() == State.Open && timeLapsed) {
+                if (currentState.compareAndSet(cState,
+                        new CurrentState(State.HalfOpen, cState.openedAt(), new AtomicInteger()))) {
+                    logger.info(node.id() + "'s' circuit was reset");
+                }
             }
         }
 
         private void putWithRetries(IdempotencyKey idempotencyKey, String key, String value)
-                throws CircuitOpenException {
+                throws CircuitOpenException, IOException {
 
-            int retryCount = 0;
             int unknowStateErrors = 0;
+            int attempts = 0;
+
+            boolean successful = false;
 
             List<Throwable> opExceptions = new ArrayList<>();
+            AtomicInteger failures = currentState.get().failures();
 
             do {
                 try {
-                    // Could get opened by other threads
-                    if (circuitOpen()) {
-                        throw new CircuitOpenException(node);
+                    if (Thread.currentThread().isInterrupted()) {
+                        opExceptions.add(new InterruptedException("  put on node " + node.id() + " was interrupted"));
+                        break;
                     }
 
-                    putWithTimebound(idempotencyKey, key, value);
+                    // Could get opened by other threads
+                    if (!circuitClosed()) {
+                        if (attempts == 0) {
+                            throw new CircuitOpenException(node);
+                        }
+
+                        break;
+                    }
+
+                    putWithTimeout(idempotencyKey, key, value);
+
+                    successful = true;
+                    failures.set(0);
 
                     break;
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
 
-                } catch (Exception e) {
+                    throw new OperationStateUnknownException(idempotencyKey,
+                            "  put operation interrupted on node " + node.id(), ie);
+                } catch (TimeoutException | IOException e) {
+                    if (failures.incrementAndGet() >= CIRCUIT_TRIP_THRESHOLD) {
+                        logger.error("  put operation failed on node " + node.id() + ", opening its circuit");
+                        transitionState(State.Closed, State.Open);
+                    }
+
+                    attempts++;
                     opExceptions.add(e);
-                    retryCount++;
 
-                    if (e instanceof OperationStateUnknownException) {
+                    if (!(e instanceof IOException)) {
                         unknowStateErrors++;
                     }
+
+                    if (attempts < MAX_RETRIES) {
+                        backOffExponentially(attempts);
+                    }
+                } catch (CircuitOpenException | IllegalArgumentException | IllegalStateException e) {
+                    throw e;
+
+                } catch (RuntimeException e) {
+                    transitionState(State.Closed, State.Open);
+
+                    throw new OperationStateUnknownException(idempotencyKey,
+                            "Could not detemine the state of the put operation on node " + node.id(), e);
                 }
-            } while (retryCount < MAX_RETRIES);
+            } while (attempts < MAX_RETRIES);
 
-            if (retryCount >= CIRCUIT_TRIP_THRESHOLD) {
-                logger.error("The put operation failed on node " + node.id() + ", opening its circuit");
-                openCircuit(State.Closed);
-            }
-
-            if (retryCount == MAX_RETRIES) {
+            if (!successful) {
                 if (unknowStateErrors > 0) {
                     throw new OperationStateUnknownException(idempotencyKey,
-                            "Could not detemine the state of the put operation on node " + node.id());
+                            "Could not detemine the state of the put operation on node " + node.id(), opExceptions);
                 }
 
-                throw new OperationRuntimeException(node, opExceptions);
+                String err = "put operation on " + node.id() + " failed";
+                throw new OperationRuntimeException(node, err, opExceptions);
             }
-
-            logger.info("The put operation was successful on node " + node.id() + ", closing its circuit");
-            closeCircuit();
-
         }
 
-        private long putWithTimebound(IdempotencyKey idempotencyKey, String key, String value) throws IOException {
-            try {
-                return putCompletionService.submit(() -> {
-                    try {
-                        return node.put(idempotencyKey, key, value);
-                    } catch (IOException e) {
-                        openCircuit(State.Probing);
+        long putWithTimeout(IdempotencyKey idempotencyKey,
+                String key, String value) throws IOException, TimeoutException, InterruptedException {
 
-                        throw e;
-                    }
-                }).get(PUT_TIMEOUT_SECS, TimeUnit.SECONDS);
-            } catch (InterruptedException | TimeoutException e) {
-                throw new OperationStateUnknownException(idempotencyKey, e);
+            Future<Long> opFuture = putExecutor.submit(() -> node.put(idempotencyKey, key, value));
+
+            try {
+                return opFuture.get(PUT_TASK_TIMEOUT_NANOS, TimeUnit.NANOSECONDS);
+
+            } catch (InterruptedException e) {
+                opFuture.cancel(true);
+                Thread.currentThread().interrupt();
+
+                throw e;
+            } catch (TimeoutException e) {
+                logger.warn(" timeout in node " + node.id() + "'s put");
+
+                opFuture.cancel(true);
+                throw e;
 
             } catch (ExecutionException e) {
-                throw (IOException) e.getCause();
+                if (e.getCause() instanceof IOException io) {
+                    throw io;
+                }
+
+                if (e.getCause() instanceof RuntimeException re) {
+                    throw re;
+                }
+
+                throw new IOException(e);
             }
+
         }
 
         private void internalTickLastTrippedBackwardsBy(int ticksInSeconds) {
-            long tripTime = lastTrippedTime.get();
+            CurrentState cState = currentState.get();
+
+            long tripTime = cState.openedAt();
             if (tripTime == Long.MIN_VALUE) {
                 return;
             }
 
-            lastTrippedTime.set(tripTime - TimeUnit.SECONDS.toNanos(ticksInSeconds));
+            long pushedBackTime = (tripTime - TimeUnit.SECONDS.toNanos(ticksInSeconds));
+
+            currentState.compareAndSet(cState, new CurrentState(cState.state(), pushedBackTime, new AtomicInteger()));
         }
 
-        private boolean circuitHalfOpen() {
-            return (state.get() == State.HalfOpen);
+        private boolean circuitClosed() {
+            return currentState.get().state() == State.Closed;
         }
 
-        private boolean circuitUnderProbe() {
-            return (state.get() == State.Probing);
+        private boolean accessible() {
+            return switch (currentState.get().state()) {
+                case Closed, HalfOpen -> true;
+                case Open, Probing -> false;
+            };
         }
 
-        private boolean circuitOpen() {
-            return (state.get() == State.Open);
-        }
+        private boolean transitionState(State from, State to) {
+            while (true) {
+                CurrentState cState = currentState.get();
 
-        private boolean probeCircuit() {
-            return state.compareAndSet(State.HalfOpen, State.Probing);
-        }
+                if (cState.state() != from) {
+                    return false;
+                }
 
-        private boolean closeCircuit() {
-            return state.compareAndSet(State.Probing, State.Closed);
-        }
+                long openedAt = (to == State.Open ? System.nanoTime() : cState.openedAt());
 
-        private boolean halfOpenCircuit() {
-            return state.compareAndSet(State.Open, State.HalfOpen);
-        }
-
-        private boolean openCircuit(State expectedState) {
-            boolean transitioned = state.compareAndSet(expectedState, State.Open);
-
-            if (transitioned) {
-                lastTrippedTime.set(System.nanoTime());
+                if (currentState.compareAndSet(cState, new CurrentState(to, openedAt, new AtomicInteger()))) {
+                    return true;
+                }
             }
+        }
 
-            return transitioned;
+        private void backOffExponentially(int retryCount) {
+            try {
+                long jitteredDelay = ThreadLocalRandom.current().nextLong(0,
+                        Math.min(RETRY_JITTER_MAX_MILLIS, (RETRY_JITTER_MAX_MILLIS / 4) << retryCount));
+
+                Thread.sleep(jitteredDelay);
+
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+            }
         }
 
     }
