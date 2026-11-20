@@ -11,8 +11,10 @@ import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
+import java.io.File;
 import java.io.IOException;
 import java.io.RandomAccessFile;
+import java.nio.file.Files;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
@@ -99,6 +101,11 @@ public class LogStoreTest {
 
         try (AppendOnlyLogStore store = new AppendOnlyLogStore(storePath)) {
             assertEquals("value-1", store.get("key-1"));
+        } catch (Throwable t) {
+            String outboxPath = storePath.replaceAll("wal-", "outbox-");
+            outboxPath = outboxPath.replaceAll(".db", ".bin");
+
+            Files.copy(new File(outboxPath).toPath(), System.out);
         }
     }
 

@@ -2,6 +2,7 @@ package lab.ds.logstore;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -390,7 +391,7 @@ public class StabilityTest {
     }
 
     @Test
-    public void rejectMidLoopTripAsUnknownState()
+    public void rejectSlowPutMidLoopTripAsUnknownState()
             throws IOException, StoreInitializationException, InterruptedException, ExecutionException {
         AppendOnlyLogStore[] stores = new AppendOnlyLogStore[poolSize];
 
@@ -405,41 +406,85 @@ public class StabilityTest {
             stores[i] = mockedStore;
         }
 
-        ExecutorService service = Executors.newFixedThreadPool(2);
+        try (AppendOnlyLogStoreClient storeClient = new AppendOnlyLogStoreClient(stores)) {
+            try (ExecutorService service = Executors.newFixedThreadPool(2)) { 
+                AtomicReference<Throwable> exception1 = new AtomicReference<>();
+                AtomicReference<Throwable> exception2 = new AtomicReference<>();
+
+                Future<?> future1 = service.submit(() -> {
+                    try {
+                        storeClient.put("key-1", "value-1");
+                    } catch (Throwable t) {
+                        exception1.set(t);
+                    }
+                });
+
+                Future<?> future2 = service.submit(() -> {
+                    try {
+                        storeClient.put("key-2", "value-2");
+                    } catch (Throwable t) {
+                        exception2.set(t);
+                    }
+                });
+
+                try {
+                    future1.get();
+                } finally {
+                }
+
+                try {
+                    future2.get();
+                } finally {
+                }
+
+                // An invalid input must fail, but not trip the circuit
+                assertInstanceOf(OperationStateUnknownException.class, exception1.get());
+                assertInstanceOf(OperationStateUnknownException.class, exception2.get());
+                assertTrue(storeClient.allCircuitsInState(ResilientNode.State.Open));
+            }
+        }
+    }
+
+    @Test
+    public void rejectDefinitiveErroMidLoopTripAsUnknownState()
+            throws IOException, StoreInitializationException, InterruptedException, ExecutionException {
+        AppendOnlyLogStore[] stores = new AppendOnlyLogStore[poolSize];
+
+        for (int i = 0; i < poolSize; i++) {
+            AppendOnlyLogStore mockedStore = mockStore();
+            stores[i] = mockedStore;
+
+            doThrow(IOException.class).when(mockedStore).put(any(), anyString(), anyString());
+        }
 
         try (AppendOnlyLogStoreClient storeClient = new AppendOnlyLogStoreClient(stores)) {
-            AtomicReference<Throwable> exception1 = new AtomicReference<>();
-            AtomicReference<Throwable> exception2 = new AtomicReference<>();
+            try (ExecutorService service = Executors.newFixedThreadPool(2)) { 
+                AtomicReference<Throwable> exception1 = new AtomicReference<>();
+                AtomicReference<Throwable> exception2 = new AtomicReference<>();
 
-            Future<?> future1 = service.submit(() -> {
-                try {
-                    storeClient.put("key-1", "value-1");
-                } catch (Throwable t) {
-                    exception1.set(t);
-                }
-            });
+                Future<?> future1 = service.submit(() -> {
+                    try {
+                        storeClient.put("key-1", "value-1");
+                    } catch (Throwable t) {
+                        exception1.set(t);
+                    }
+                });
 
-            Future<?> future2 = service.submit(() -> {
-                try {
-                    storeClient.put("key-2", "value-2");
-                } catch (Throwable t) {
-                    exception2.set(t);
-                }
-            });
+                Future<?> future2 = service.submit(() -> {
+                    try {
+                        storeClient.put("key-2", "value-2");
+                    } catch (Throwable t) {
+                        exception2.set(t);
+                    }
+                });
 
-            try {
                 future1.get();
-            } finally {
-            }
-
-            try {
                 future2.get();
-            } finally {
-            }
 
-            // An invalid input must fail, but not trip the circuit
-            assertEquals(OperationStateUnknownException.class, exception1.get().getClass());
-            assertEquals(OperationStateUnknownException.class, exception2.get().getClass());
+                assertInstanceOf(QuorumNotReachedException.class, exception1.get());
+                assertInstanceOf(QuorumNotReachedException.class, exception2.get());
+                assertTrue(storeClient.allCircuitsInState(ResilientNode.State.Open));
+            }
         }
     }
 

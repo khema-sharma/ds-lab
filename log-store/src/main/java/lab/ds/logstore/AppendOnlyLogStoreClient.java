@@ -472,9 +472,10 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
             do {
                 try {
                     if (Thread.currentThread().isInterrupted()) {
+                        opExceptions.add(new InterruptedException("  put on node " + node.id() + " was interrupted"));
                         break;
                     }
-                    
+
                     // Could get opened by other threads
                     if (!circuitClosed()) {
                         if (attempts == 0) {
