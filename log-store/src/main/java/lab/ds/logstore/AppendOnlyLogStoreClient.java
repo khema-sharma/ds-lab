@@ -148,7 +148,7 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
 
                 if (futureOp == null) {
                     throw new OperationStateUnknownException(idempotencyKey,
-                            "Timeout while awaiting response from quorum");
+                            "Timeout while awaiting response from quorum", causes);
                 }
 
                 if (succeededOperation(futureOp)) {
@@ -181,7 +181,7 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
 
                 if (unknownStateErrors > 0) {
                     throw new OperationStateUnknownException(idempotencyKey,
-                            "Unable to determine the state of the put operation");
+                            "Unable to determine the state of the put operation", causes);
                 }
 
                 if (successCount == 0 && openCircuitErrors == poolSize) {
@@ -285,7 +285,13 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
     }
 
     private ExecutorService createdFixedPoolExecutor() {
-        return Executors.newFixedThreadPool(poolSize);
+        return Executors.newFixedThreadPool(poolSize, r -> {
+            Thread t = new Thread(r);
+            t.setName("quorum-executor-" + t.threadId());
+            t.setDaemon(true);
+
+            return t;
+        });
     }
 
     private static class CircuitOpenException extends Exception {
@@ -296,10 +302,14 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
 
     }
 
-    private static class OperationRuntimeException extends RuntimeException {
+    static class OperationRuntimeException extends RuntimeException {
 
         public OperationRuntimeException(AppendOnlyLogStore node, String message, List<Throwable> causes) {
             super(message);
+
+            if (causes != null) {
+                causes.forEach(this::addSuppressed);
+            }
         }
 
     }
@@ -340,7 +350,12 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
             currentState = new AtomicReference<CurrentState>(
                     new CurrentState(State.Closed, Long.MIN_VALUE, new AtomicInteger()));
 
-            putExecutor = Executors.newFixedThreadPool(5);
+            putExecutor = Executors.newFixedThreadPool(5, r -> {
+                Thread t = new Thread(r);
+                t.setName("node-executor-" + t.threadId());
+
+                return t;
+            });
         }
 
         /**
@@ -526,7 +541,7 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
             if (!successful) {
                 if (unknowStateErrors > 0) {
                     throw new OperationStateUnknownException(idempotencyKey,
-                            "Could not detemine the state of the put operation on node " + node.id());
+                            "Could not detemine the state of the put operation on node " + node.id(), opExceptions);
                 }
 
                 String err = "put operation on " + node.id() + " failed";

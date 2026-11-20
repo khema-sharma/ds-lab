@@ -106,6 +106,8 @@ public class LogStoreTest {
             outboxPath = outboxPath.replaceAll(".db", ".bin");
 
             Files.copy(new File(outboxPath).toPath(), System.out);
+
+            throw t;
         }
     }
 

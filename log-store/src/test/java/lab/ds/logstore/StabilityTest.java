@@ -15,6 +15,7 @@ import static org.mockito.Mockito.when;
 
 import java.io.IOException;
 import java.time.Duration;
+import java.util.Arrays;
 import java.util.UUID;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -407,7 +408,7 @@ public class StabilityTest {
         }
 
         try (AppendOnlyLogStoreClient storeClient = new AppendOnlyLogStoreClient(stores)) {
-            try (ExecutorService service = Executors.newFixedThreadPool(2)) { 
+            try (ExecutorService service = Executors.newFixedThreadPool(2)) {
                 AtomicReference<Throwable> exception1 = new AtomicReference<>();
                 AtomicReference<Throwable> exception2 = new AtomicReference<>();
 
@@ -427,26 +428,27 @@ public class StabilityTest {
                     }
                 });
 
-                try {
-                    future1.get();
-                } finally {
-                }
+                future1.get();
+                future2.get();
 
-                try {
-                    future2.get();
-                } finally {
-                }
-
-                // An invalid input must fail, but not trip the circuit
                 assertInstanceOf(OperationStateUnknownException.class, exception1.get());
+                Arrays.stream(exception1.get().getSuppressed())
+                        .forEach(t -> assertInstanceOf(OperationStateUnknownException.class, t));
+
                 assertInstanceOf(OperationStateUnknownException.class, exception2.get());
+                Arrays.stream(exception2.get().getSuppressed())
+                        .forEach(t -> assertInstanceOf(OperationStateUnknownException.class, t));
+
+                // Waits for all tasks to complete
+                storeClient.close();
+
                 assertTrue(storeClient.allCircuitsInState(ResilientNode.State.Open));
             }
         }
     }
 
     @Test
-    public void rejectDefinitiveErroMidLoopTripAsUnknownState()
+    public void rejectDefinitiveErrorMidLoopTripAsUnknownState()
             throws IOException, StoreInitializationException, InterruptedException, ExecutionException {
         AppendOnlyLogStore[] stores = new AppendOnlyLogStore[poolSize];
 
@@ -458,7 +460,7 @@ public class StabilityTest {
         }
 
         try (AppendOnlyLogStoreClient storeClient = new AppendOnlyLogStoreClient(stores)) {
-            try (ExecutorService service = Executors.newFixedThreadPool(2)) { 
+            try (ExecutorService service = Executors.newFixedThreadPool(2)) {
                 AtomicReference<Throwable> exception1 = new AtomicReference<>();
                 AtomicReference<Throwable> exception2 = new AtomicReference<>();
 
@@ -482,7 +484,18 @@ public class StabilityTest {
                 future2.get();
 
                 assertInstanceOf(QuorumNotReachedException.class, exception1.get());
+                Arrays.stream(exception1.get().getSuppressed())
+                        .forEach(t -> assertInstanceOf(AppendOnlyLogStoreClient.OperationRuntimeException.class,
+                                t));
+
                 assertInstanceOf(QuorumNotReachedException.class, exception2.get());
+                Arrays.stream(exception1.get().getSuppressed())
+                        .forEach(t -> assertInstanceOf(AppendOnlyLogStoreClient.OperationRuntimeException.class,
+                                t));
+
+                // Waits for all tasks to complete
+                storeClient.close();
+
                 assertTrue(storeClient.allCircuitsInState(ResilientNode.State.Open));
             }
         }
