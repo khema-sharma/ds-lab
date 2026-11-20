@@ -59,8 +59,8 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
         //
         // For each node this time is spent in parallel
         QUORUM_TIMOUT_NANOS = (ResilientNode.MAX_RETRIES * ResilientNode.PUT_TASK_TIMEOUT_NANOS)
-                // Buffer
-                + TimeUnit.SECONDS.toNanos(1);
+                // 2 backoffs
+                + TimeUnit.SECONDS.toNanos(2);
     }
 
     final ArrayList<ResilientNode> nodes;
@@ -247,9 +247,9 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
         }
     }
 
-    boolean allCircuitsClosed() {
+    boolean allCircuitsInState(ResilientNode.State state) {
         for (ResilientNode node : nodes) {
-            if (!node.getCircuitState().equals(ResilientNode.State.Closed)) {
+            if (!node.getCircuitState().equals(state)) {
                 return false;
             }
         }
@@ -325,7 +325,7 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
 
         private static final int RETRY_JITTER_MAX_MILLIS = 1000;
 
-        private enum State {
+        enum State {
             Closed, HalfOpen, Probing, Open
         }
 
@@ -427,21 +427,21 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
                 throw new CircuitOpenException(node);
             }
 
+            boolean succeeded = false;
+
             try {
                 putWithTimeout(idempotencyKey, key, value);
-                transitionState(State.Probing, State.Closed);
-
+                succeeded = true;
             } catch (InterruptedException | TimeoutException e) {
                 throw new OperationStateUnknownException(idempotencyKey,
-                        "Couldn't determine the result of the slow put task.");
+                        "Couldn't determine the result of the slow put task.", e);
             } catch (Throwable e) {
-                transitionState(State.Probing, State.Open);
-
                 if (e instanceof IOException ioe) {
                     throw ioe;
                 }
-
                 throw new IOException(e);
+            } finally {
+                transitionState(State.Probing, succeeded ? State.Closed : State.Open);
             }
 
         }
@@ -487,15 +487,19 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
                     failures.set(0);
 
                     break;
-                } catch (InterruptedException | TimeoutException e) {
-                    failures.incrementAndGet();
-                    unknowStateErrors++;
-
-                } catch (IOException e) {
-                    failures.incrementAndGet();
-                    retries++;
+                } catch (InterruptedException | TimeoutException | IOException e) {
+                    if (failures.incrementAndGet() >= CIRCUIT_TRIP_THRESHOLD) {
+                        logger.error("  put operation failed on node " + node.id() + " after " + retries + " failures, opening its circuit");
+                        transitionState(State.Closed, State.Open);
+                    }
 
                     opExceptions.add(e);
+
+                    if (e instanceof IOException) {
+                        retries++;
+                    } else {
+                        unknowStateErrors++;
+                    }
 
                     if (retries < MAX_RETRIES) {
                         backOffExponentially(retries);
@@ -510,11 +514,6 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
                             "Could not detemine the state of the put operation on node " + node.id(), e);
                 }
             } while (retries < MAX_RETRIES && failures.get() < CIRCUIT_TRIP_THRESHOLD);
-
-            if (failures.incrementAndGet() >= CIRCUIT_TRIP_THRESHOLD) {
-                logger.error("  put operation failed on node " + node.id() + ", opening its circuit");
-                transitionState(State.Closed, State.Open);
-            }
 
             if (!successful) {
                 if (unknowStateErrors > 0) {
@@ -602,8 +601,8 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
 
         private void backOffExponentially(int retryCount) {
             try {
-                long jitteredDelay = ThreadLocalRandom.current().nextLong(RETRY_JITTER_MAX_MILLIS / 4,
-                        RETRY_JITTER_MAX_MILLIS);
+                long jitteredDelay = ThreadLocalRandom.current().nextLong(0,
+                        Math.min(RETRY_JITTER_MAX_MILLIS, (RETRY_JITTER_MAX_MILLIS / 4) << retryCount));
 
                 Thread.sleep(jitteredDelay);
 

@@ -3,6 +3,7 @@ package lab.ds.logstore;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doAnswer;
@@ -21,6 +22,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import lab.ds.logstore.AppendOnlyLogStoreClient.ResilientNode;
 import lab.ds.logstore.core.IdempotencyKey;
 
 @ExtendWith(MockitoExtension.class)
@@ -80,10 +82,7 @@ public class StabilityTest {
         for (int i = 0; i < quorumSize; i++) {
             AppendOnlyLogStore mockedStore = mockStore();
 
-            doThrow(IOException.class)
-                    .when(mockedStore)
-                    .put(any(), anyString(), anyString());
-
+            doThrow(IOException.class).when(mockedStore).put(any(), anyString(), anyString());
             stores[index++] = mockedStore;
         }
 
@@ -137,8 +136,10 @@ public class StabilityTest {
             // Quorum fails
             assertThrows(QuorumNotReachedException.class, () -> storeClient.put("key-1", "value-1"));
 
-            // Quorum has attempted MAX_RETRIES attempts on quorum before tripping the circuit
-            boolean quorumRetried = (attemptsCounter1.get() >= getQuorumSize(poolSize) * AppendOnlyLogStoreClient.ResilientNode.MAX_RETRIES
+            // Quorum has attempted MAX_RETRIES attempts on quorum before tripping the
+            // circuit
+            boolean quorumRetried = (attemptsCounter1.get() >= getQuorumSize(poolSize)
+                    * AppendOnlyLogStoreClient.ResilientNode.MAX_RETRIES
                     && attemptsCounter1.get() <= poolSize * AppendOnlyLogStoreClient.ResilientNode.MAX_RETRIES);
 
             assertEquals(true, quorumRetried);
@@ -363,8 +364,9 @@ public class StabilityTest {
             assertThrows(QuorumNotReachedException.class, () -> storeClient.put("key-1", "value-1"));
             // Wait until circuit resets, open -> half-open
             storeClient.internalWaitUntilStateSwitchThreshold();
-            // half-open -> probe -> closed
+            // half-open -> probe -> open
             assertThrows(OperationStateUnknownException.class, () -> storeClient.put("key-1", "value-1"));
+            assertEquals(true, storeClient.allCircuitsInState(ResilientNode.State.Open));
         }
     }
 
@@ -378,7 +380,7 @@ public class StabilityTest {
 
             // An invalid input must fail, but not trip the circuit
             assertThrows(IllegalArgumentException.class, () -> storeClient.put(spyKey, "key-1", "value-1"));
-            assertEquals(true, storeClient.allCircuitsClosed());
+            assertEquals(true, storeClient.allCircuitsInState(ResilientNode.State.Closed));
         }
     }
 
@@ -390,8 +392,7 @@ public class StabilityTest {
         storeClient.close();
 
         assertEquals(true, storeClient.quorumExecutorService.isTerminated());
-        assertEquals(0,
-                Thread.getAllStackTraces().keySet().stream().filter(t -> t.getName().startsWith("pool-")).count());
+        storeClient.nodes.forEach(n -> assertTrue(n.putExecutor.isTerminated()));
     }
 
     private AppendOnlyLogStore mockStore() {
