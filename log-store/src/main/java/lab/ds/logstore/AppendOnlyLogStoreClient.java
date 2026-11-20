@@ -237,10 +237,15 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
 
     @Override
     public void close() throws IOException {
+        quorumExecutorService.shutdown();
+        
         try {
-            quorumExecutorService.shutdownNow();
-            quorumExecutorService.awaitTermination(QUORUM_TIMOUT_NANOS, TimeUnit.NANOSECONDS);
+            if (!quorumExecutorService.awaitTermination(QUORUM_TIMOUT_NANOS, TimeUnit.NANOSECONDS)) {
+                logger.warn("Node tasks were still running even after await; interrupting");
+                quorumExecutorService.shutdownNow();
+            }
         } catch (InterruptedException e) {
+            quorumExecutorService.shutdownNow();
             Thread.currentThread().interrupt();
         }
 
