@@ -156,8 +156,6 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
                 } else {
                     Throwable executionException = futureOp.exceptionNow();
 
-                    logger.info("Quorum put failed with " + executionException.getClass());
-
                     if (executionException instanceof IllegalArgumentException
                             || executionException instanceof IllegalStateException) {
                         throw (RuntimeException) executionException;
@@ -435,10 +433,12 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
             } catch (InterruptedException | TimeoutException e) {
                 throw new OperationStateUnknownException(idempotencyKey,
                         "Couldn't determine the result of the slow put task.", e);
-            } catch (Throwable e) {
-                if (e instanceof IOException ioe) {
-                    throw ioe;
-                }
+            } catch (IllegalArgumentException | IllegalStateException e) {
+                succeeded = true;
+                throw e;
+            } catch (IOException e) {
+                throw e;
+            } catch (RuntimeException e) {
                 throw new IOException(e);
             } finally {
                 transitionState(State.Probing, succeeded ? State.Closed : State.Open);
@@ -462,7 +462,7 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
                 throws CircuitOpenException, IOException {
 
             int unknowStateErrors = 0;
-            int retries = 0;
+            int attempts = 0;
 
             boolean successful = false;
 
@@ -470,15 +470,15 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
             AtomicInteger failures = currentState.get().failures();
 
             do {
+                if (Thread.currentThread().isInterrupted()) {
+                    throw new OperationStateUnknownException(idempotencyKey,
+                            "Put retry was interrupted for node " + node.id() + ", cannot determine its state");
+                }
+
                 try {
                     // Could get opened by other threads
                     if (!circuitClosed()) {
                         throw new CircuitOpenException(node);
-                    }
-
-                    if (Thread.currentThread().isInterrupted()) {
-                        throw new OperationStateUnknownException(idempotencyKey,
-                                "Put retry was interrupted for node " + node.id() + ", cannot determine its state");
                     }
 
                     putWithTimeout(idempotencyKey, key, value);
@@ -487,22 +487,26 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
                     failures.set(0);
 
                     break;
-                } catch (InterruptedException | TimeoutException | IOException e) {
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    
+                    throw new OperationStateUnknownException(idempotencyKey,
+                            "  put operation interrupted on node " + node.id(), ie);
+                } catch (TimeoutException | IOException e) {
                     if (failures.incrementAndGet() >= CIRCUIT_TRIP_THRESHOLD) {
-                        logger.error("  put operation failed on node " + node.id() + " after " + retries + " failures, opening its circuit");
+                        logger.error("  put operation failed on node " + node.id() + ", opening its circuit");
                         transitionState(State.Closed, State.Open);
                     }
 
+                    attempts++;
                     opExceptions.add(e);
 
-                    if (e instanceof IOException) {
-                        retries++;
-                    } else {
+                    if (!(e instanceof IOException)) {
                         unknowStateErrors++;
                     }
 
-                    if (retries < MAX_RETRIES) {
-                        backOffExponentially(retries);
+                    if (attempts < MAX_RETRIES) {
+                        backOffExponentially(attempts);
                     }
                 } catch (CircuitOpenException | IllegalArgumentException | IllegalStateException e) {
                     throw e;
@@ -513,7 +517,7 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
                     throw new OperationStateUnknownException(idempotencyKey,
                             "Could not detemine the state of the put operation on node " + node.id(), e);
                 }
-            } while (retries < MAX_RETRIES && failures.get() < CIRCUIT_TRIP_THRESHOLD);
+            } while (attempts < MAX_RETRIES);
 
             if (!successful) {
                 if (unknowStateErrors > 0) {
