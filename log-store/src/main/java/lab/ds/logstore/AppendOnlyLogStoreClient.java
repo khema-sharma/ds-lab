@@ -128,6 +128,7 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
         ExecutorCompletionService<Boolean> opCompletionService = new ExecutorCompletionService<>(quorumExecutorService);
 
         long deadline = System.nanoTime() + QUORUM_TIMOUT_NANOS;
+        boolean quorumReached = false;
 
         List<Future<Boolean>> putFutures = nodes.stream().map(decoratedNode -> opCompletionService.submit(() -> {
             decoratedNode.put(idempotencyKey, key, value);
@@ -192,12 +193,16 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
                 throw new QuorumNotReachedException(idempotencyKey, "Failed to save record", causes);
             }
 
+            quorumReached = true;
             logger.info(" put operation on the quorum was successful");
+
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new OperationStateUnknownException(idempotencyKey, e);
         } finally {
-            putFutures.forEach(future -> future.cancel(true));
+            if (!quorumReached) {
+                putFutures.forEach(future -> future.cancel(true));
+            }
         }
     }
 

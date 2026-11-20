@@ -486,7 +486,7 @@ public class StabilityTest {
                                 t));
 
                 assertInstanceOf(QuorumNotReachedException.class, exception2.get());
-                Arrays.stream(exception1.get().getSuppressed())
+                Arrays.stream(exception2.get().getSuppressed())
                         .forEach(t -> assertInstanceOf(AppendOnlyLogStoreClient.OperationRuntimeException.class,
                                 t));
 
