@@ -392,6 +392,110 @@ public class StabilityTest {
     }
 
     @Test
+    public void rejectSlowPutMidLoopTripAsUnknownState()
+            throws IOException, StoreInitializationException, InterruptedException, ExecutionException {
+        AppendOnlyLogStore[] stores = new AppendOnlyLogStore[poolSize];
+
+        for (int i = 0; i < poolSize; i++) {
+            AppendOnlyLogStore mockedStore = mockStore();
+
+            doAnswer(invocation -> {
+                Thread.sleep(Duration.ofSeconds(4));
+                return 1L;
+            }).when(mockedStore).put(any(), anyString(), anyString());
+
+            stores[i] = mockedStore;
+        }
+
+        try (AppendOnlyLogStoreClient storeClient = new AppendOnlyLogStoreClient(stores)) {
+            try (ExecutorService service = Executors.newFixedThreadPool(2)) {
+                AtomicReference<Throwable> exception1 = new AtomicReference<>();
+                AtomicReference<Throwable> exception2 = new AtomicReference<>();
+
+                Future<?> future1 = service.submit(() -> {
+                    try {
+                        storeClient.put("key-1", "value-1");
+                    } catch (Throwable t) {
+                        exception1.set(t);
+                    }
+                });
+
+                Future<?> future2 = service.submit(() -> {
+                    try {
+                        storeClient.put("key-2", "value-2");
+                    } catch (Throwable t) {
+                        exception2.set(t);
+                    }
+                });
+
+                future1.get();
+                future2.get();
+
+                assertInstanceOf(OperationStateUnknownException.class, exception1.get());
+                Arrays.stream(exception1.get().getSuppressed())
+                        .forEach(t -> assertInstanceOf(OperationStateUnknownException.class, t));
+
+                assertInstanceOf(OperationStateUnknownException.class, exception2.get());
+                Arrays.stream(exception2.get().getSuppressed())
+                        .forEach(t -> assertInstanceOf(OperationStateUnknownException.class, t));
+
+                assertTrue(storeClient.allCircuitsInState(ResilientNode.State.Open));
+            }
+        }
+    }
+
+    @Test
+    public void rejectDefinitiveErrorMidLoopTripAsQuorumNotReached()
+            throws IOException, StoreInitializationException, InterruptedException, ExecutionException {
+        AppendOnlyLogStore[] stores = new AppendOnlyLogStore[poolSize];
+
+        for (int i = 0; i < poolSize; i++) {
+            AppendOnlyLogStore mockedStore = mockStore();
+            stores[i] = mockedStore;
+
+            doThrow(IOException.class).when(mockedStore).put(any(), anyString(), anyString());
+        }
+
+        try (AppendOnlyLogStoreClient storeClient = new AppendOnlyLogStoreClient(stores)) {
+            try (ExecutorService service = Executors.newFixedThreadPool(2)) {
+                AtomicReference<Throwable> exception1 = new AtomicReference<>();
+                AtomicReference<Throwable> exception2 = new AtomicReference<>();
+
+                Future<?> future1 = service.submit(() -> {
+                    try {
+                        storeClient.put("key-1", "value-1");
+                    } catch (Throwable t) {
+                        exception1.set(t);
+                    }
+                });
+
+                Future<?> future2 = service.submit(() -> {
+                    try {
+                        storeClient.put("key-2", "value-2");
+                    } catch (Throwable t) {
+                        exception2.set(t);
+                    }
+                });
+
+                future1.get();
+                future2.get();
+
+                assertInstanceOf(QuorumNotReachedException.class, exception1.get());
+                Arrays.stream(exception1.get().getSuppressed())
+                        .forEach(t -> assertInstanceOf(AppendOnlyLogStoreClient.OperationRuntimeException.class,
+                                t));
+
+                assertInstanceOf(QuorumNotReachedException.class, exception2.get());
+                Arrays.stream(exception1.get().getSuppressed())
+                        .forEach(t -> assertInstanceOf(AppendOnlyLogStoreClient.OperationRuntimeException.class,
+                                t));
+
+                assertTrue(storeClient.allCircuitsInState(ResilientNode.State.Open));
+            }
+        }
+    }
+
+    @Test
     public void acceptsCleanShutdown() throws IOException, StoreInitializationException {
         AppendOnlyLogStoreClient storeClient = new AppendOnlyLogStoreClient(poolSize);
 

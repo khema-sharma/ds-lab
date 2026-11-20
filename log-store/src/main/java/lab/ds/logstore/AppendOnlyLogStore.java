@@ -228,12 +228,27 @@ public class AppendOnlyLogStore extends AbstractStore implements Closeable {
             Thread.currentThread().interrupt();
         }
 
+        try {
+            replicatorService.awaitTermination(MAX_PUT_WAIT_NANOS, TimeUnit.NANOSECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+
+        IOException ioException = null;
         for (Closeable closeable : closeables) {
             try {
                 closeable.close();
-            } catch (IOException e) {
-                logger.error("An error occurred while trying to close the store", e);
+            } catch (Exception e) {
+                if (ioException == null) {
+                    ioException = new IOException("An error occurred while trying to close the store", e);
+                }
+
+                ioException.addSuppressed(e);
             }
+        }
+
+        if (ioException != null) {
+            throw ioException;
         }
     }
 

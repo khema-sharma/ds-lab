@@ -105,7 +105,11 @@ public class LogStoreTest {
             String outboxPath = storePath.replaceAll("wal-", "outbox-");
             outboxPath = outboxPath.replaceAll(".db", ".bin");
 
-            Files.copy(new File(outboxPath).toPath(), System.out);
+            try {
+                Files.copy(new File(outboxPath).toPath(), System.out);
+            } catch (IOException ioe) {
+                t.addSuppressed(ioe);
+            }
 
             throw t;
         }

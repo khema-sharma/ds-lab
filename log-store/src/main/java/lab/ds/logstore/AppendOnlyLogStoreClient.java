@@ -17,6 +17,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Collectors;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -91,7 +92,7 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
         poolSize = size;
         quorumSize = (poolSize * 4) / 5;
 
-        quorumExecutorService = createdFixedPoolExecutor();
+        quorumExecutorService = createPoolExecutorService();
 
         nodes = new ArrayList<>(poolSize);
         for (int i = 0; i < poolSize; i++) {
@@ -128,10 +129,10 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
 
         long deadline = System.nanoTime() + QUORUM_TIMOUT_NANOS;
 
-        nodes.forEach(decoratedNode -> opCompletionService.submit(() -> {
+        List<Future<Boolean>> putFutures = nodes.stream().map(decoratedNode -> opCompletionService.submit(() -> {
             decoratedNode.put(idempotencyKey, key, value);
             return true;
-        }));
+        })).collect(Collectors.toList());
 
         try {
             int successCount = 0;
@@ -195,6 +196,8 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new OperationStateUnknownException(idempotencyKey, e);
+        } finally {
+            putFutures.forEach(future -> future.cancel(true));
         }
     }
 
@@ -284,13 +287,8 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
         nodes.forEach(node -> node.internalTickLastTrippedBackwardsBy(9));
     }
 
-    private ExecutorService createdFixedPoolExecutor() {
-        return Executors.newFixedThreadPool(poolSize, r -> {
-            Thread t = new Thread(r);
-            t.setName("quorum-executor-" + t.threadId());
-
-            return t;
-        });
+    private ExecutorService createPoolExecutorService() {
+        return Executors.newVirtualThreadPerTaskExecutor();
     }
 
     private static class CircuitOpenException extends Exception {
@@ -349,12 +347,7 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
             currentState = new AtomicReference<CurrentState>(
                     new CurrentState(State.Closed, Long.MIN_VALUE, new AtomicInteger()));
 
-            putExecutor = Executors.newFixedThreadPool(5, r -> {
-                Thread t = new Thread(r);
-                t.setName(store.id() + "-executor-" + t.threadId());
-
-                return t;
-            });
+            putExecutor = Executors.newVirtualThreadPerTaskExecutor();
         }
 
         /**
