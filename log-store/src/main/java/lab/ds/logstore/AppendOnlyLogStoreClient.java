@@ -288,7 +288,6 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
         return Executors.newFixedThreadPool(poolSize, r -> {
             Thread t = new Thread(r);
             t.setName("quorum-executor-" + t.threadId());
-            t.setDaemon(true);
 
             return t;
         });
@@ -352,7 +351,7 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
 
             putExecutor = Executors.newFixedThreadPool(5, r -> {
                 Thread t = new Thread(r);
-                t.setName("node-executor-" + t.threadId());
+                t.setName(store.id() + "-executor-" + t.threadId());
 
                 return t;
             });
