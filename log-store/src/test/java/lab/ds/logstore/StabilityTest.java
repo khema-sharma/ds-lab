@@ -15,8 +15,13 @@ import static org.mockito.Mockito.when;
 import java.io.IOException;
 import java.time.Duration;
 import java.util.UUID;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -381,6 +386,60 @@ public class StabilityTest {
             // An invalid input must fail, but not trip the circuit
             assertThrows(IllegalArgumentException.class, () -> storeClient.put(spyKey, "key-1", "value-1"));
             assertEquals(true, storeClient.allCircuitsInState(ResilientNode.State.Closed));
+        }
+    }
+
+    @Test
+    public void rejectMidLoopTripAsUnknownState()
+            throws IOException, StoreInitializationException, InterruptedException, ExecutionException {
+        AppendOnlyLogStore[] stores = new AppendOnlyLogStore[poolSize];
+
+        for (int i = 0; i < poolSize; i++) {
+            AppendOnlyLogStore mockedStore = mockStore();
+
+            doAnswer(invocation -> {
+                Thread.sleep(Duration.ofSeconds(4));
+                return 1L;
+            }).when(mockedStore).put(any(), anyString(), anyString());
+
+            stores[i] = mockedStore;
+        }
+
+        ExecutorService service = Executors.newFixedThreadPool(2);
+
+        try (AppendOnlyLogStoreClient storeClient = new AppendOnlyLogStoreClient(stores)) {
+            AtomicReference<Throwable> exception1 = new AtomicReference<>();
+            AtomicReference<Throwable> exception2 = new AtomicReference<>();
+
+            Future<?> future1 = service.submit(() -> {
+                try {
+                    storeClient.put("key-1", "value-1");
+                } catch (Throwable t) {
+                    exception1.set(t);
+                }
+            });
+
+            Future<?> future2 = service.submit(() -> {
+                try {
+                    storeClient.put("key-2", "value-2");
+                } catch (Throwable t) {
+                    exception2.set(t);
+                }
+            });
+
+            try {
+                future1.get();
+            } finally {
+            }
+
+            try {
+                future2.get();
+            } finally {
+            }
+
+            // An invalid input must fail, but not trip the circuit
+            assertEquals(OperationStateUnknownException.class, exception1.get().getClass());
+            assertEquals(OperationStateUnknownException.class, exception2.get().getClass());
         }
     }
 

@@ -470,15 +470,18 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
             AtomicInteger failures = currentState.get().failures();
 
             do {
-                if (Thread.currentThread().isInterrupted()) {
-                    throw new OperationStateUnknownException(idempotencyKey,
-                            "Put retry was interrupted for node " + node.id() + ", cannot determine its state");
-                }
-
                 try {
+                    if (Thread.currentThread().isInterrupted()) {
+                        break;
+                    }
+                    
                     // Could get opened by other threads
                     if (!circuitClosed()) {
-                        throw new CircuitOpenException(node);
+                        if (attempts == 0) {
+                            throw new CircuitOpenException(node);
+                        }
+
+                        break;
                     }
 
                     putWithTimeout(idempotencyKey, key, value);
@@ -489,7 +492,7 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
                     break;
                 } catch (InterruptedException ie) {
                     Thread.currentThread().interrupt();
-                    
+
                     throw new OperationStateUnknownException(idempotencyKey,
                             "  put operation interrupted on node " + node.id(), ie);
                 } catch (TimeoutException | IOException e) {
