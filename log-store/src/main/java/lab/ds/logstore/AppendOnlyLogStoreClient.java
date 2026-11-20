@@ -237,6 +237,13 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
 
     @Override
     public void close() throws IOException {
+        try {
+            quorumExecutorService.shutdownNow();
+            quorumExecutorService.awaitTermination(QUORUM_TIMOUT_NANOS, TimeUnit.NANOSECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+
         nodes.forEach(store -> {
             try {
                 store.close();
@@ -244,13 +251,6 @@ public final class AppendOnlyLogStoreClient implements LogStoreClient, Closeable
                 logger.error("An error occurred while closing the store: " + e.getMessage(), e);
             }
         });
-
-        try {
-            quorumExecutorService.shutdownNow();
-            quorumExecutorService.awaitTermination(QUORUM_TIMOUT_NANOS, TimeUnit.NANOSECONDS);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
     }
 
     boolean allCircuitsInState(ResilientNode.State state) {
